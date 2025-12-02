@@ -1,0 +1,23 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# local model checkouts
+/models/
+qwen3-*/
+/*.safetensors
+
+# python helpers
+__pycache__/
+.venv/
+*.pyc
+
+# editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# profiling output
+perf.data*
+*.log
