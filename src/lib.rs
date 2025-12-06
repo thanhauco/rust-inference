@@ -2,6 +2,8 @@
 
 pub mod dtype;
 pub mod error;
+pub mod tensor;
 
 pub use dtype::DType;
 pub use error::{Error, Result};
+pub use tensor::{Device, Tensor};
