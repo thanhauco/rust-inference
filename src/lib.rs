@@ -2,6 +2,7 @@
 
 pub mod dtype;
 pub mod error;
+pub mod safetensors;
 pub mod tensor;
 
 pub use dtype::DType;
