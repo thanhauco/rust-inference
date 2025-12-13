@@ -1,0 +1,5 @@
+{
+  "eos_token": "<|im_end|>",
+  "pad_token": "<|endoftext|>",
+  "bos_token": null
+}
