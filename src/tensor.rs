@@ -201,7 +201,7 @@ impl Tensor {
                 map.len()
             )));
         }
-        let aligned = (map.as_ptr() as usize + start) % dtype.size() == 0;
+        let aligned = (map.as_ptr() as usize + start).is_multiple_of(dtype.size());
         if !aligned {
             return Tensor::from_bytes(&map[start..start + len], shape, dtype);
         }

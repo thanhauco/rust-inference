@@ -110,10 +110,10 @@ impl SafeTensorReader {
     pub fn load(&self, name: &str) -> Result<Tensor> {
         let info = self.info(name)?;
         let mut t = Tensor::from_mmap(self.map.clone(), info.start, &info.shape, info.dtype)?;
-        if info.dtype == DType::F8E4M3 {
-            if let Some(scale) = self.load_scale(name)? {
-                t.set_scale(scale)?;
-            }
+        if info.dtype == DType::F8E4M3
+            && let Some(scale) = self.load_scale(name)?
+        {
+            t.set_scale(scale)?;
         }
         Ok(t)
     }
