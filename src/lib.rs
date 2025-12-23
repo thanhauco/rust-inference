@@ -3,6 +3,7 @@
 pub mod cpu;
 pub mod dtype;
 pub mod error;
+pub mod kvcache;
 pub mod ops;
 pub mod safetensors;
 pub mod tensor;
