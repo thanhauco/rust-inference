@@ -1,5 +1,6 @@
 //! garlic: a small LLM inference engine for Qwen3-family models.
 
+pub mod attention;
 pub mod cpu;
 pub mod dtype;
 pub mod error;
