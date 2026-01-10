@@ -12,7 +12,12 @@ authors = ["Thanh <thanhauco@gmail.com>"]
 name = "garlic"
 path = "src/lib.rs"
 
+[[bin]]
+name = "runner"
+path = "src/bin/runner.rs"
+
 [dependencies]
+clap = { version = "4.5", features = ["derive"] }
 half = "2.4"
 memmap2 = "0.9"
 rayon = "1.10"
