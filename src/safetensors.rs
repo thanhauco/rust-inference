@@ -75,10 +75,7 @@ impl SafeTensorReader {
             };
             let expected = info.shape.iter().product::<usize>() * dtype.size();
             if info.end - info.start != expected || info.end > map.len() {
-                return Err(Error::Safetensors(format!(
-                    "{}: bad data offsets for {name}",
-                    path.display()
-                )));
+                return Err(Error::Safetensors(format!("{}: bad data offsets for {name}", path.display())));
             }
             tensors.insert(name, info);
         }
@@ -94,9 +91,7 @@ impl SafeTensorReader {
     }
 
     pub fn info(&self, name: &str) -> Result<&TensorInfo> {
-        self.tensors
-            .get(name)
-            .ok_or_else(|| Error::TensorNotFound(format!("{name} in {}", self.path.display())))
+        self.tensors.get(name).ok_or_else(|| Error::TensorNotFound(format!("{name} in {}", self.path.display())))
     }
 
     /// Raw bytes of a tensor, straight out of the mapping.
@@ -127,22 +122,20 @@ impl SafeTensorReader {
         let raw = &self.map[info.start..info.end];
         let vals: Vec<f32> = match info.dtype {
             DType::F32 => raw.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect(),
-            DType::BF16 => raw
-                .chunks_exact(2)
-                .map(|c| dtype::bf16_to_f32(u16::from_le_bytes([c[0], c[1]])))
-                .collect(),
-            DType::F16 => raw
-                .chunks_exact(2)
-                .map(|c| dtype::f16_to_f32(u16::from_le_bytes([c[0], c[1]])))
-                .collect(),
-            other => return Err(Error::Unsupported(format!("scale dtype {other} for {name}"))),
+            DType::BF16 => raw.chunks_exact(2).map(|c| dtype::bf16_to_f32(u16::from_le_bytes([c[0], c[1]]))).collect(),
+            DType::F16 => raw.chunks_exact(2).map(|c| dtype::f16_to_f32(u16::from_le_bytes([c[0], c[1]]))).collect(),
+            other => {
+                return Err(Error::Unsupported(format!("scale dtype {other} for {name}")));
+            }
         };
         // Some checkpoints store a per-tensor scalar scale; normalise to 2-D.
         let shape = match info.shape.len() {
             0 => vec![1, 1],
             1 => vec![1, info.shape[0]],
             2 => info.shape.clone(),
-            _ => return Err(Error::Shape(format!("scale for {name} has shape {:?}", info.shape))),
+            _ => {
+                return Err(Error::Shape(format!("scale for {name} has shape {:?}", info.shape)));
+            }
         };
         Ok(Some(Tensor::from_f32(&vals, &shape)?))
     }
@@ -189,11 +182,7 @@ impl ModelLoader {
     }
 
     fn shard(&mut self, name: &str) -> Result<&SafeTensorReader> {
-        let file = self
-            .weight_to_file
-            .get(name)
-            .ok_or_else(|| Error::TensorNotFound(name.to_string()))?
-            .clone();
+        let file = self.weight_to_file.get(name).ok_or_else(|| Error::TensorNotFound(name.to_string()))?.clone();
         if !self.shards.contains_key(&file) {
             let reader = SafeTensorReader::open(self.dir.join(&file))?;
             self.shards.insert(file.clone(), reader);
@@ -237,8 +226,7 @@ pub fn save(path: impl AsRef<Path>, tensors: &[(String, Tensor)]) -> Result<()> 
         );
         offset += len;
     }
-    let mut header_bytes = serde_json::to_vec(&serde_json::Value::Object(header))
-        .map_err(|e| Error::json(path, e))?;
+    let mut header_bytes = serde_json::to_vec(&serde_json::Value::Object(header)).map_err(|e| Error::json(path, e))?;
     // keep the data section 8-byte aligned
     while (8 + header_bytes.len()) % 8 != 0 {
         header_bytes.push(b' ');
@@ -286,8 +274,7 @@ mod tests {
         let dir = tmpdir("fp8");
         let w = Tensor::from_f32(&[0.5; 8], &[2, 4]).unwrap().to_dtype(DType::F8E4M3).unwrap();
         let s = Tensor::from_f32(&[2.0], &[1, 1]).unwrap().to_dtype(DType::BF16).unwrap();
-        save(dir.join("model.safetensors"), &[("w.weight".into(), w), ("w.weight_scale_inv".into(), s)])
-            .unwrap();
+        save(dir.join("model.safetensors"), &[("w.weight".into(), w), ("w.weight_scale_inv".into(), s)]).unwrap();
         let mut loader = ModelLoader::new(&dir).unwrap();
         let w2 = loader.load("w.weight").unwrap();
         assert_eq!(w2.dtype(), DType::F8E4M3);

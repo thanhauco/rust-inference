@@ -15,11 +15,7 @@ pub fn rms_norm(x: &mut Tensor, weight: &Tensor, eps: f32, group: Option<usize>)
     expect_f32(x, "rms_norm")?;
     let group = group.unwrap_or_else(|| *x.shape().last().unwrap());
     if weight.numel() != group || !x.numel().is_multiple_of(group) {
-        return Err(Error::Shape(format!(
-            "rms_norm: x {:?}, weight {:?}, group {group}",
-            x.shape(),
-            weight.shape()
-        )));
+        return Err(Error::Shape(format!("rms_norm: x {:?}, weight {:?}, group {group}", x.shape(), weight.shape())));
     }
     let w = weight_f32(weight)?;
     x.as_mut_slice::<f32>()?.par_chunks_mut(group).for_each(|row| {

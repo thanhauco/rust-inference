@@ -29,8 +29,13 @@ pub trait LanguageModel: Send + Sync {
 
     /// Run `input_ids` / `positions` (both `[B, S]`, U32) through the model,
     /// appending to `caches`, and return logits.
-    fn forward(&self, input_ids: &Tensor, positions: &Tensor, caches: &mut [KvCache], mode: LogitsMode)
-    -> Result<Tensor>;
+    fn forward(
+        &self,
+        input_ids: &Tensor,
+        positions: &Tensor,
+        caches: &mut [KvCache],
+        mode: LogitsMode,
+    ) -> Result<Tensor>;
 }
 
 /// Load whichever supported architecture `dir/config.json` describes.

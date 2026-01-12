@@ -100,9 +100,10 @@ impl KvCache {
             for logical in self.seq_lens[b] / PAGE_SIZE..end.div_ceil(PAGE_SIZE) {
                 let slot = &mut self.page_table[b * self.max_pages_per_seq + logical];
                 if *slot < 0 {
-                    let page = self.free_pages.pop().ok_or_else(|| {
-                        Error::Config(format!("KV cache out of pages ({} total)", self.max_pages))
-                    })?;
+                    let page = self
+                        .free_pages
+                        .pop()
+                        .ok_or_else(|| Error::Config(format!("KV cache out of pages ({} total)", self.max_pages)))?;
                     *slot = page as i32;
                 }
             }

@@ -82,7 +82,11 @@ impl Drop for AlignedBytes {
 pub enum CpuBuffer {
     Owned(AlignedBytes),
     /// Zero-copy view into a memory-mapped safetensors shard.
-    Mapped { map: Arc<Mmap>, start: usize, len: usize },
+    Mapped {
+        map: Arc<Mmap>,
+        start: usize,
+        len: usize,
+    },
 }
 
 impl CpuBuffer {
@@ -176,9 +180,7 @@ impl Tensor {
             return Err(Error::Shape(format!("element size mismatch for {dtype}")));
         }
         // SAFETY: T is Pod, reading its bytes is always valid.
-        let bytes = unsafe {
-            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
-        };
+        let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data)) };
         Tensor::from_bytes(bytes, shape, dtype)
     }
 
@@ -339,21 +341,14 @@ impl Tensor {
         match &mut self.storage {
             Storage::Cpu(arc) => match Arc::get_mut(arc) {
                 Some(CpuBuffer::Owned(b)) => Ok(&mut b.as_mut_slice()[range]),
-                Some(CpuBuffer::Mapped { .. }) => {
-                    Err(Error::Unsupported("mutating a memory-mapped tensor".into()))
-                }
+                Some(CpuBuffer::Mapped { .. }) => Err(Error::Unsupported("mutating a memory-mapped tensor".into())),
                 None => Err(Error::Unsupported("mutating a shared tensor".into())),
             },
         }
     }
 
     fn check_elem<T: Pod>(&self) {
-        assert_eq!(
-            std::mem::size_of::<T>(),
-            self.dtype.size(),
-            "element size does not match dtype {}",
-            self.dtype
-        );
+        assert_eq!(std::mem::size_of::<T>(), self.dtype.size(), "element size does not match dtype {}", self.dtype);
     }
 
     pub fn as_slice<T: Pod>(&self) -> &[T] {
@@ -381,9 +376,7 @@ impl Tensor {
             DType::F32 => self.as_slice::<f32>().to_vec(),
             DType::BF16 => self.as_slice::<u16>().iter().map(|&b| dtype::bf16_to_f32(b)).collect(),
             DType::F16 => self.as_slice::<u16>().iter().map(|&h| dtype::f16_to_f32(h)).collect(),
-            DType::F8E4M3 => {
-                self.as_slice::<u8>().iter().map(|&b| dtype::fp8_e4m3_to_f32(b)).collect()
-            }
+            DType::F8E4M3 => self.as_slice::<u8>().iter().map(|&b| dtype::fp8_e4m3_to_f32(b)).collect(),
             other => return Err(Error::Unsupported(format!("to_f32_vec on {other}"))),
         })
     }

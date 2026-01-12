@@ -109,8 +109,7 @@ impl BpeTokenizer {
 
         let cfg_path = dir.join("tokenizer_config.json");
         if let Ok(text) = std::fs::read_to_string(&cfg_path) {
-            let cfg: serde_json::Value =
-                serde_json::from_str(&text).map_err(|e| Error::json(&cfg_path, e))?;
+            let cfg: serde_json::Value = serde_json::from_str(&text).map_err(|e| Error::json(&cfg_path, e))?;
             let special = |key: &str| -> Option<u32> {
                 let v = cfg.get(key)?;
                 let s = v.as_str().or_else(|| v.get("content").and_then(|c| c.as_str()))?;
@@ -130,14 +129,7 @@ impl BpeTokenizer {
     }
 
     fn from_parts(tj: TokenizerJson) -> Result<Self> {
-        let max_id = tj
-            .model
-            .vocab
-            .values()
-            .chain(tj.added_tokens.iter().map(|a| &a.id))
-            .copied()
-            .max()
-            .unwrap_or(0);
+        let max_id = tj.model.vocab.values().chain(tj.added_tokens.iter().map(|a| &a.id)).copied().max().unwrap_or(0);
         let mut id_to_token = vec![String::new(); max_id as usize + 1];
         let mut token_to_id = HashMap::with_capacity(tj.model.vocab.len() + tj.added_tokens.len());
         for (s, &id) in &tj.model.vocab {
@@ -160,9 +152,9 @@ impl BpeTokenizer {
         let mut char_to_byte = HashMap::with_capacity(256);
         for (b, &c) in alphabet.iter().enumerate() {
             char_to_byte.insert(c, b as u8);
-            byte_ids[b] = *token_to_id.get(&c.to_string()).ok_or_else(|| {
-                Error::Config(format!("vocab is missing the byte token for {b:#04x}"))
-            })?;
+            byte_ids[b] = *token_to_id
+                .get(&c.to_string())
+                .ok_or_else(|| Error::Config(format!("vocab is missing the byte token for {b:#04x}")))?;
         }
 
         let mut merges = HashMap::with_capacity(tj.model.merges.len());
@@ -184,11 +176,7 @@ impl BpeTokenizer {
             merges.entry((li, ri)).or_insert((rank as u32, mi));
         }
 
-        let nfc = tj
-            .normalizer
-            .as_ref()
-            .map(|n| n.to_string().contains("\"NFC\""))
-            .unwrap_or(false);
+        let nfc = tj.normalizer.as_ref().map(|n| n.to_string().contains("\"NFC\"")).unwrap_or(false);
 
         let find = |s: &str| token_to_id.get(s).copied();
         Ok(BpeTokenizer {
@@ -379,7 +367,9 @@ impl BpeTokenizer {
             }
             return;
         }
-        let Some(tok) = self.id_to_token.get(id as usize) else { return };
+        let Some(tok) = self.id_to_token.get(id as usize) else {
+            return;
+        };
         for c in tok.chars() {
             match self.char_to_byte.get(&c) {
                 Some(&b) => out.push(b),

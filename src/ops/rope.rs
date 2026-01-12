@@ -17,9 +17,7 @@ impl RotaryEmbedding {
     /// `inv_freq[i] = 1 / theta^(2i / head_dim)`, computed in f32 like
     /// `transformers` does so positions line up bit-for-bit.
     pub fn new(theta: f32, head_dim: usize) -> Self {
-        let inv_freq = (0..head_dim / 2)
-            .map(|i| 1.0 / theta.powf((2 * i) as f32 / head_dim as f32))
-            .collect();
+        let inv_freq = (0..head_dim / 2).map(|i| 1.0 / theta.powf((2 * i) as f32 / head_dim as f32)).collect();
         RotaryEmbedding { head_dim, inv_freq, attention_scaling: 1.0 }
     }
 

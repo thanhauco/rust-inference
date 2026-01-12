@@ -7,10 +7,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::Parser;
+use garlic::Tensor;
 use garlic::models::{self, LogitsMode};
 use garlic::ops;
 use garlic::tokenizer::{BpeTokenizer, StreamDecoder};
-use garlic::Tensor;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Greedy text generation with a Qwen3 / Qwen3-MoE checkpoint")]

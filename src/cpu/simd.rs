@@ -38,9 +38,8 @@ fn detect() -> Isa {
     {
         let allow512 = cap.is_none_or(|c| c == "avx512");
         let allow2 = cap.is_none_or(|c| c == "avx512" || c == "avx2");
-        let avx2 = is_x86_feature_detected!("avx2")
-            && is_x86_feature_detected!("fma")
-            && is_x86_feature_detected!("f16c");
+        let avx2 =
+            is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") && is_x86_feature_detected!("f16c");
         if allow512 && avx2 && is_x86_feature_detected!("avx512f") {
             return Isa::Avx512;
         }
@@ -326,10 +325,7 @@ pub(crate) mod x86 {
             let w32 = _mm256_cvtepu8_epi32(b);
             let sgn = _mm256_slli_epi32(_mm256_and_si256(w32, _mm256_set1_epi32(0x80)), 24);
             let mag = _mm256_slli_epi32(_mm256_and_si256(w32, _mm256_set1_epi32(0x7F)), 20);
-            let sub = _mm256_cmpeq_epi32(
-                _mm256_and_si256(w32, _mm256_set1_epi32(0x78)),
-                _mm256_setzero_si256(),
-            );
+            let sub = _mm256_cmpeq_epi32(_mm256_and_si256(w32, _mm256_set1_epi32(0x78)), _mm256_setzero_si256());
             let nbits = _mm256_andnot_si256(sub, _mm256_or_si256(sgn, mag));
             let vnorm = _mm256_mul_ps(_mm256_castsi256_ps(nbits), _mm256_set1_ps(f32::from_bits(0x7B80_0000))); // 2^120
             let msub = _mm256_mul_ps(

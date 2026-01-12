@@ -43,10 +43,7 @@ mod tests {
 
     #[test]
     fn gathers_rows() {
-        let table = Tensor::from_f32(&[0., 1., 10., 11., 20., 21.], &[3, 2])
-            .unwrap()
-            .to_dtype(DType::BF16)
-            .unwrap();
+        let table = Tensor::from_f32(&[0., 1., 10., 11., 20., 21.], &[3, 2]).unwrap().to_dtype(DType::BF16).unwrap();
         let ids = Tensor::from_u32(&[2, 0, 2], &[1, 3]).unwrap();
         let out = embedding(&ids, &table).unwrap();
         assert_eq!(out.shape(), &[1, 3, 2]);

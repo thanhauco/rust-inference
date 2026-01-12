@@ -45,11 +45,7 @@ pub fn topk_softmax(logits: &Tensor, k: usize, normalize: bool) -> Result<(Vec<u
             idx.truncate(k);
             let max = row[idx[0] as usize];
             let mut w: Vec<f32> = idx.iter().map(|&i| (row[i as usize] - max).exp()).collect();
-            let denom: f32 = if normalize {
-                w.iter().sum()
-            } else {
-                row.iter().map(|&v| (v - max).exp()).sum()
-            };
+            let denom: f32 = if normalize { w.iter().sum() } else { row.iter().map(|&v| (v - max).exp()).sum() };
             w.iter_mut().for_each(|v| *v /= denom);
             (idx, w)
         })
