@@ -7,6 +7,7 @@ pub mod error;
 pub mod kvcache;
 pub mod models;
 pub mod ops;
+pub mod profiler;
 pub mod safetensors;
 pub mod tensor;
 pub mod tokenizer;

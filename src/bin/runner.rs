@@ -4,13 +4,16 @@
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
-use garlic::Tensor;
-use garlic::models::{self, LogitsMode};
+use garlic::kvcache::KvCache;
+use garlic::models::{self, LanguageModel, LogitsMode};
 use garlic::ops;
+use garlic::profiler::Section;
+use garlic::profiler::{self, PowerProfiler};
 use garlic::tokenizer::{BpeTokenizer, StreamDecoder};
+use garlic::{Tensor, profile};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Greedy text generation with a Qwen3 / Qwen3-MoE checkpoint")]
@@ -53,6 +56,54 @@ struct Args {
     /// Worker threads (defaults to all cores)
     #[arg(short = 't', long)]
     threads: Option<usize>,
+
+    /// Print a per-section timing breakdown at the end
+    #[arg(long)]
+    profile: bool,
+
+    /// Measure energy (RAPL / NVML) for idle, load and inference phases
+    #[arg(long)]
+    power: bool,
+
+    /// Length of the idle power measurements, in seconds
+    #[arg(long, default_value_t = 10)]
+    power_idle_secs: u64,
+}
+
+/// Energy measurement following the C++ runner: let the previous phase's
+/// draw settle for a few seconds, then measure.
+struct Power {
+    counters: Option<Vec<Box<dyn profiler::EnergyCounter>>>,
+}
+
+impl Power {
+    const SETTLE: Duration = Duration::from_secs(5);
+
+    fn new(enabled: bool) -> Self {
+        let counters = enabled.then(profiler::available_counters);
+        if counters.as_ref().is_some_and(Vec::is_empty) {
+            eprintln!("--power: no energy counters available (RAPL/NVML)");
+        }
+        Power { counters }
+    }
+
+    fn measure<T>(&mut self, label: &str, f: impl FnOnce() -> T) -> T {
+        let Some(counters) = self.counters.take() else {
+            return f();
+        };
+        let p = PowerProfiler::start(counters, Self::SETTLE);
+        let out = f();
+        let (reading, counters) = p.finish();
+        eprintln!("{label} {reading}");
+        self.counters = Some(counters);
+        out
+    }
+
+    fn idle(&mut self, label: &str, secs: u64) {
+        if self.counters.is_some() {
+            self.measure(label, || std::thread::sleep(Duration::from_secs(secs)));
+        }
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -61,15 +112,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rayon::ThreadPoolBuilder::new().num_threads(n).build_global()?;
     }
 
+    profiler::enable(args.profile);
+    let mut power = Power::new(args.power);
+    power.idle("IDLE", args.power_idle_secs);
+
     let tokenizer = BpeTokenizer::load(args.tokenizer.as_ref().unwrap_or(&args.model_dir))?;
     let t0 = Instant::now();
-    let model = models::from_pretrained(&args.model_dir)?;
+    let model = power.measure("MODEL LOADING", || models::from_pretrained(&args.model_dir))?;
     eprintln!(
         "loaded {:?} ({} layers) in {:.2}s",
         model.config().architecture,
         model.config().config.num_hidden_layers,
         t0.elapsed().as_secs_f64()
     );
+    power.idle("IDLE WITH MODEL", args.power_idle_secs);
     let mut caches = model.new_kv_caches(1, args.max_pages, args.pages_per_seq);
 
     let prompt = match &args.prompt {
@@ -88,15 +144,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("empty prompt".into());
     }
 
+    let n = prompt_ids.len();
+    let stats = power.measure("INFERENCE", || generate(&args, &*model, &tokenizer, &prompt_ids, &mut caches))?;
+
+    eprintln!();
+    eprintln!("prefill: {n} tokens in {:.3}s ({:.1} tok/s)", stats.prefill_s, n as f64 / stats.prefill_s);
+    if stats.steps > 0 {
+        eprintln!(
+            "decode:  {} tokens in {:.3}s ({:.2} tok/s)",
+            stats.steps,
+            stats.decode_s,
+            stats.steps as f64 / stats.decode_s
+        );
+    }
+    if args.profile {
+        eprintln!("\n{}", profiler::report());
+    }
+    Ok(())
+}
+
+struct Stats {
+    prefill_s: f64,
+    decode_s: f64,
+    steps: usize,
+}
+
+fn generate(
+    args: &Args,
+    model: &dyn LanguageModel,
+    tokenizer: &BpeTokenizer,
+    prompt_ids: &[u32],
+    caches: &mut [KvCache],
+) -> Result<Stats, Box<dyn std::error::Error>> {
     let mut stdout = std::io::stdout().lock();
     let mut stream = StreamDecoder::new();
     let n = prompt_ids.len();
 
     let t_prefill = Instant::now();
-    let ids = Tensor::from_u32(&prompt_ids, &[1, n])?;
+    let ids = Tensor::from_u32(prompt_ids, &[1, n])?;
     let pos: Vec<u32> = (0..n as u32).collect();
-    let logits = model.forward(&ids, &Tensor::from_u32(&pos, &[1, n])?, &mut caches, LogitsMode::Last)?;
-    let mut next = ops::argmax_last(&logits)?[0];
+    let logits = model.forward(&ids, &Tensor::from_u32(&pos, &[1, n])?, caches, LogitsMode::Last)?;
+    let mut next = profile!(Section::Sampling, ops::argmax_last(&logits)?[0]);
     let prefill_s = t_prefill.elapsed().as_secs_f64();
 
     let t_decode = Instant::now();
@@ -105,7 +193,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if !args.ignore_eos && tokenizer.is_stop_token(next) {
             break;
         }
-        write!(stdout, "{}", stream.push(&tokenizer, next))?;
+        write!(stdout, "{}", stream.push(tokenizer, next))?;
         stdout.flush()?;
         if generated >= args.max_new_tokens {
             break;
@@ -114,20 +202,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let logits = model.forward(
             &Tensor::from_u32(&[next], &[1, 1])?,
             &Tensor::from_u32(&[pos], &[1, 1])?,
-            &mut caches,
+            caches,
             LogitsMode::Last,
         )?;
-        next = ops::argmax_last(&logits)?[0];
+        next = profile!(Section::Sampling, ops::argmax_last(&logits)?[0]);
         generated += 1;
     }
     writeln!(stdout, "{}", stream.finish())?;
-    let decode_s = t_decode.elapsed().as_secs_f64();
-
-    eprintln!();
-    eprintln!("prefill: {n} tokens in {:.3}s ({:.1} tok/s)", prefill_s, n as f64 / prefill_s);
-    let steps = generated - 1;
-    if steps > 0 {
-        eprintln!("decode:  {steps} tokens in {:.3}s ({:.2} tok/s)", decode_s, steps as f64 / decode_s);
-    }
-    Ok(())
+    Ok(Stats { prefill_s, decode_s: t_decode.elapsed().as_secs_f64(), steps: generated - 1 })
 }
