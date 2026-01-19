@@ -9,6 +9,7 @@ pub mod models;
 pub mod ops;
 pub mod profiler;
 pub mod safetensors;
+pub mod sampling;
 pub mod tensor;
 pub mod tokenizer;
 

@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use clap::Parser;
 use garlic::kvcache::KvCache;
 use garlic::models::{self, LanguageModel, LogitsMode};
-use garlic::ops;
 use garlic::profiler::Section;
 use garlic::profiler::{self, PowerProfiler};
+use garlic::sampling::{Sampler, SamplingParams};
 use garlic::tokenizer::{BpeTokenizer, StreamDecoder};
 use garlic::{Tensor, profile};
 
@@ -68,6 +68,26 @@ struct Args {
     /// Length of the idle power measurements, in seconds
     #[arg(long, default_value_t = 10)]
     power_idle_secs: u64,
+
+    /// Sampling temperature; 0 = greedy
+    #[arg(long, default_value_t = 0.0)]
+    temperature: f32,
+
+    /// Keep only the k most likely tokens (0 = off)
+    #[arg(long, default_value_t = 0)]
+    top_k: usize,
+
+    /// Nucleus sampling threshold (1.0 = off)
+    #[arg(long, default_value_t = 1.0)]
+    top_p: f32,
+
+    /// Penalty for tokens already in the context (1.0 = off)
+    #[arg(long, default_value_t = 1.0)]
+    repetition_penalty: f32,
+
+    /// Sampling seed
+    #[arg(long, default_value_t = 0x5EED)]
+    seed: u64,
 }
 
 /// Energy measurement following the C++ runner: let the previous phase's
@@ -184,7 +204,15 @@ fn generate(
     let ids = Tensor::from_u32(prompt_ids, &[1, n])?;
     let pos: Vec<u32> = (0..n as u32).collect();
     let logits = model.forward(&ids, &Tensor::from_u32(&pos, &[1, n])?, caches, LogitsMode::Last)?;
-    let mut next = profile!(Section::Sampling, ops::argmax_last(&logits)?[0]);
+    let mut sampler = Sampler::new(SamplingParams {
+        temperature: args.temperature,
+        top_k: args.top_k,
+        top_p: args.top_p,
+        repetition_penalty: args.repetition_penalty,
+        seed: args.seed,
+    });
+    let mut history = prompt_ids.to_vec();
+    let mut next = profile!(Section::Sampling, sampler.sample(logits.as_slice::<f32>(), &history));
     let prefill_s = t_prefill.elapsed().as_secs_f64();
 
     let t_decode = Instant::now();
@@ -205,7 +233,8 @@ fn generate(
             caches,
             LogitsMode::Last,
         )?;
-        next = profile!(Section::Sampling, ops::argmax_last(&logits)?[0]);
+        history.push(next);
+        next = profile!(Section::Sampling, sampler.sample(logits.as_slice::<f32>(), &history));
         generated += 1;
     }
     writeln!(stdout, "{}", stream.finish())?;
