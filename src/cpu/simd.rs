@@ -311,29 +311,29 @@ pub(crate) mod x86 {
 
     /// Branch-free E4M3 -> f32 for 8 bytes.
     ///
-    /// `s|eeee|mmm` placed into an f32 as `s<<31 | e<<23 | m<<20` equals
-    /// `(1 + m/8) * 2^(e-127)`; multiplying by 2^120 gives the true value.
-    /// Subnormal lanes (e == 0) are rebuilt as `m * 2^-9` through int->float
-    /// so no lane ever goes through denormal arithmetic (which costs ~100
-    /// cycles of microcode on most cores). NaN bytes (0x7F/0xFF) decode to
-    /// +-480; they never occur in valid checkpoints.
+    /// For normal values (e != 0), `(1 + m/8) * 2^(e-7)` is an f32 with
+    /// biased exponent `e + 120` and mantissa `m << 20`, built with integer
+    /// ops only. Subnormal lanes (e == 0) are `m * 2^-9`, exact via
+    /// int->float. Nothing here ever does float arithmetic on a denormal: the
+    /// classic "place bits and multiply by 2^120" trick does, as soon as the
+    /// compiler moves the multiply ahead of the lane masking (LLVM does), and
+    /// every denormal lane costs ~100 cycles of microcode. NaN bytes
+    /// (0x7F/0xFF) decode to +-480; they never occur in valid checkpoints.
     #[target_feature(enable = "avx2,fma")]
     #[inline]
     pub unsafe fn decode8_fp8(p: *const u8) -> __m256 {
         unsafe {
-            let b = _mm_loadl_epi64(p as *const __m128i);
-            let w32 = _mm256_cvtepu8_epi32(b);
+            let w32 = _mm256_cvtepu8_epi32(_mm_loadl_epi64(p as *const __m128i));
             let sgn = _mm256_slli_epi32(_mm256_and_si256(w32, _mm256_set1_epi32(0x80)), 24);
             let mag = _mm256_slli_epi32(_mm256_and_si256(w32, _mm256_set1_epi32(0x7F)), 20);
+            let norm = _mm256_add_epi32(mag, _mm256_set1_epi32(120 << 23));
             let sub = _mm256_cmpeq_epi32(_mm256_and_si256(w32, _mm256_set1_epi32(0x78)), _mm256_setzero_si256());
-            let nbits = _mm256_andnot_si256(sub, _mm256_or_si256(sgn, mag));
-            let vnorm = _mm256_mul_ps(_mm256_castsi256_ps(nbits), _mm256_set1_ps(f32::from_bits(0x7B80_0000))); // 2^120
-            let msub = _mm256_mul_ps(
+            let subv = _mm256_mul_ps(
                 _mm256_cvtepi32_ps(_mm256_and_si256(w32, _mm256_set1_epi32(0x7))),
                 _mm256_set1_ps(1.0 / 512.0),
             );
-            let sbits = _mm256_and_si256(sub, _mm256_or_si256(_mm256_castps_si256(msub), sgn));
-            _mm256_castsi256_ps(_mm256_or_si256(_mm256_castps_si256(vnorm), sbits))
+            let bits = _mm256_blendv_epi8(norm, _mm256_castps_si256(subv), sub);
+            _mm256_castsi256_ps(_mm256_or_si256(bits, sgn))
         }
     }
 
