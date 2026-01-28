@@ -50,45 +50,98 @@ impl PagedAttention {
         let kp = cache.k_pages().as_slice::<f32>();
         let vp = cache.v_pages().as_slice::<f32>();
 
+        // One task per (sequence, token, kv head): the `group` query heads
+        // sharing a KV head are contiguous, so each K/V row is read once for
+        // all of them.
         let mut out = vec![0f32; qv.len()];
-        out.par_chunks_mut(dh).enumerate().for_each(|(row, o)| {
-            let head = row % h;
-            let tok = (row / h) % s;
-            let bi = row / (h * s);
-            let kvh = head / group;
-            let qrow = &qv[row * dh..(row + 1) * dh];
-            let qpos = cache.seq_len(bi) - s + tok;
-            let table = &cache.page_table()[bi * cache.max_pages_per_seq()..];
-
-            let mut m = f32::NEG_INFINITY;
-            let mut l = 0f32;
-            let mut scores = [0f32; PAGE_SIZE];
-            for (logical, &page) in table[..=qpos / PAGE_SIZE].iter().enumerate() {
-                let page = page as usize;
-                let n = (qpos + 1 - logical * PAGE_SIZE).min(PAGE_SIZE);
-                let base = cache.row_offset(page, kvh, 0);
-                let mut block_max = f32::NEG_INFINITY;
-                for (j, sc) in scores[..n].iter_mut().enumerate() {
-                    let krow = &kp[base + j * dh..base + (j + 1) * dh];
-                    *sc = simd::dot(qrow, krow) * self.scale;
-                    block_max = block_max.max(*sc);
+        out.par_chunks_mut(group * dh).enumerate().for_each(|(task, o)| {
+            let kvh = task % hkv;
+            let tok = (task / hkv) % s;
+            let bi = task / (hkv * s);
+            let q0 = ((bi * s + tok) * h + kvh * group) * dh;
+            let ctx = Ctx {
+                kp,
+                vp,
+                cache,
+                kvh,
+                dh,
+                scale: self.scale,
+                qpos: cache.seq_len(bi) - s + tok,
+                table: &cache.page_table()[bi * cache.max_pages_per_seq()..],
+            };
+            let qs = &qv[q0..q0 + group * dh];
+            match group {
+                1 => attend::<1>(&ctx, qs, o),
+                2 => attend::<2>(&ctx, qs, o),
+                3 => attend::<3>(&ctx, qs, o),
+                4 => attend::<4>(&ctx, qs, o),
+                5 => attend::<5>(&ctx, qs, o),
+                6 => attend::<6>(&ctx, qs, o),
+                7 => attend::<7>(&ctx, qs, o),
+                8 => attend::<8>(&ctx, qs, o),
+                _ => {
+                    for (qh, oh) in qs.chunks_exact(dh).zip(o.chunks_exact_mut(dh)) {
+                        attend::<1>(&ctx, qh, oh);
+                    }
                 }
-                let m_new = m.max(block_max);
-                let correction = (m - m_new).exp();
-                if correction != 1.0 {
-                    simd::scale(o, correction);
-                }
-                l *= correction;
-                for (j, sc) in scores[..n].iter().enumerate() {
-                    let p = (sc - m_new).exp();
-                    l += p;
-                    simd::axpy(o, p, &vp[base + j * dh..base + (j + 1) * dh]);
-                }
-                m = m_new;
             }
-            simd::scale(o, 1.0 / l);
         });
         Tensor::from_f32(&out, q.shape())
+    }
+}
+
+struct Ctx<'a> {
+    kp: &'a [f32],
+    vp: &'a [f32],
+    cache: &'a KvCache,
+    table: &'a [i32],
+    kvh: usize,
+    dh: usize,
+    qpos: usize,
+    scale: f32,
+}
+
+/// Online-softmax attention of `G` query heads (`qs: [G, Dh]`) against one
+/// KV head, a page at a time.
+#[allow(clippy::needless_range_loop)]
+fn attend<const G: usize>(c: &Ctx<'_>, qs: &[f32], o: &mut [f32]) {
+    let dh = c.dh;
+    let qrows: [&[f32]; G] = std::array::from_fn(|g| &qs[g * dh..(g + 1) * dh]);
+    let mut m = [f32::NEG_INFINITY; G];
+    let mut l = [0f32; G];
+    let mut scores = [[0f32; PAGE_SIZE]; G];
+    for (logical, &page) in c.table[..=c.qpos / PAGE_SIZE].iter().enumerate() {
+        let n = (c.qpos + 1 - logical * PAGE_SIZE).min(PAGE_SIZE);
+        let base = c.cache.row_offset(page as usize, c.kvh, 0);
+        let mut block_max = [f32::NEG_INFINITY; G];
+        for j in 0..n {
+            let d = simd::dot_mr::<G>(&c.kp[base + j * dh..base + (j + 1) * dh], &qrows);
+            for g in 0..G {
+                scores[g][j] = d[g] * c.scale;
+                block_max[g] = block_max[g].max(scores[g][j]);
+            }
+        }
+        let mut m_new = [0f32; G];
+        for (g, og) in o.chunks_exact_mut(dh).enumerate() {
+            m_new[g] = m[g].max(block_max[g]);
+            let correction = (m[g] - m_new[g]).exp();
+            if correction != 1.0 {
+                simd::scale(og, correction);
+            }
+            l[g] *= correction;
+            m[g] = m_new[g];
+        }
+        for j in 0..n {
+            let vrow = &c.vp[base + j * dh..base + (j + 1) * dh];
+            for (g, og) in o.chunks_exact_mut(dh).enumerate() {
+                let p = (scores[g][j] - m_new[g]).exp();
+                l[g] += p;
+                simd::axpy(og, p, vrow);
+            }
+        }
+    }
+    for (g, og) in o.chunks_exact_mut(dh).enumerate() {
+        simd::scale(og, 1.0 / l[g]);
     }
 }
 
@@ -130,7 +183,13 @@ mod tests {
 
     #[test]
     fn prefill_then_decode_matches_dense() {
-        let (h, hkv, dh) = (4, 2, 8);
+        // GQA groups of 2, 8, 3 and 9 (the last takes the per-head fallback)
+        for (h, hkv) in [(4, 2), (8, 1), (6, 2), (9, 1)] {
+            check_against_dense(h, hkv, 8);
+        }
+    }
+
+    fn check_against_dense(h: usize, hkv: usize, dh: usize) {
         let total = 70; // spans three pages
         let k = data(total * hkv * dh, 0.1);
         let v = data(total * hkv * dh, 0.7);
@@ -151,7 +210,7 @@ mod tests {
         }
         let want = reference(&q, &k, &v, total, total, h, hkv, dh);
         for (i, (a, b)) in got.iter().zip(&want).enumerate() {
-            assert!((a - b).abs() < 1e-5, "elem {i}: {a} vs {b}");
+            assert!((a - b).abs() < 1e-5, "h={h} hkv={hkv} elem {i}: {a} vs {b}");
         }
     }
 }
