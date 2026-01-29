@@ -7,6 +7,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
+
+// glibc hands large freed blocks back to the kernel, so every op's output
+// buffer would page-fault again on first touch, and the faults from parallel
+// writers contend in the kernel. mimalloc keeps the memory mapped.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use garlic::kvcache::KvCache;
 use garlic::models::{self, LanguageModel, LogitsMode};
 use garlic::profiler::Section;

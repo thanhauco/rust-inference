@@ -6,6 +6,9 @@
 
 use std::time::Instant;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use garlic::cpu::linear::linear_f32;
 use garlic::{DType, Tensor};
 
