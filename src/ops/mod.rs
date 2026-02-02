@@ -7,6 +7,7 @@
 mod elementwise;
 mod embedding;
 mod linear;
+mod moe;
 mod norm;
 mod reduce;
 mod rope;
@@ -14,6 +15,7 @@ mod rope;
 pub use elementwise::{add_inplace, swiglu};
 pub use embedding::embedding;
 pub use linear::linear;
+pub use moe::MoeRouting;
 pub use norm::{add_rms_norm, rms_norm};
 pub use reduce::{argmax_last, topk_softmax};
 pub use rope::{RotaryEmbedding, apply_rope};
