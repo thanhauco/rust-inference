@@ -1,4 +1,4 @@
-//! End-to-end check of the Qwen3 forward pass against the
+//! End-to-end check of the Qwen3 / Qwen3-MoE forward pass against the
 //! float64 numpy reference in scripts/reference_qwen3.py: prefill logits for
 //! every prompt position, then incremental decode through the paged KV cache.
 
@@ -71,6 +71,16 @@ fn check(name: &str) {
 #[test]
 fn qwen3_dense_tied() {
     check("tiny-qwen3");
+}
+
+#[test]
+fn qwen3_moe() {
+    check("tiny-qwen3-moe");
+}
+
+#[test]
+fn qwen3_moe_fp8() {
+    check("tiny-qwen3-moe-fp8");
 }
 
 #[test]

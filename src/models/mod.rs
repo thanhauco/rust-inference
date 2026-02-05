@@ -1,6 +1,7 @@
 //! Model definitions.
 
 pub mod config;
+pub mod moe;
 pub mod qwen3;
 
 use std::path::Path;

@@ -7,6 +7,7 @@ use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::kvcache::KvCache;
 use crate::models::config::{Architecture, ModelConfig, Qwen3Config};
+use crate::models::moe::SparseMoe;
 use crate::models::{LanguageModel, LogitsMode};
 use crate::ops::{self, RotaryEmbedding};
 use crate::profile;
@@ -31,6 +32,7 @@ pub struct Mlp {
 
 pub enum Ffn {
     Dense(Mlp),
+    Sparse(SparseMoe),
 }
 
 pub struct DecoderLayer {
@@ -133,6 +135,7 @@ impl DecoderLayer {
         );
         let mut out = match &self.ffn {
             Ffn::Dense(mlp) => profile!(Section::Mlp, mlp.forward(&h)?),
+            Ffn::Sparse(moe) => moe.forward(&h)?,
         };
         ops::add_inplace(&mut out, &residual)?;
         Ok(out)
@@ -168,10 +171,11 @@ impl Qwen3 {
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         for i in 0..cfg.num_hidden_layers {
             let p = format!("model.layers.{i}.");
-            if config.architecture == Architecture::Qwen3Moe && cfg.is_sparse_layer(i) {
-                return Err(Error::Unsupported("Qwen3-MoE sparse layers are not implemented yet".into()));
-            }
-            let ffn = Ffn::Dense(Mlp::load(&mut wl, &format!("{p}mlp."))?);
+            let ffn = if config.architecture == Architecture::Qwen3Moe && cfg.is_sparse_layer(i) {
+                Ffn::Sparse(SparseMoe::load(&mut wl, &format!("{p}mlp."), cfg)?)
+            } else {
+                Ffn::Dense(Mlp::load(&mut wl, &format!("{p}mlp."))?)
+            };
             layers.push(DecoderLayer {
                 idx: i,
                 input_layernorm: wl.load_as(&format!("{p}input_layernorm.weight"), DType::F32)?,
