@@ -1,10 +1,8 @@
 //! Qwen3-MoE sparse block: router + top-k experts.
 
-use rayon::prelude::*;
-
+use crate::cpu::expert::{self, ExpertWeights};
 use crate::error::{Error, Result};
 use crate::models::config::Qwen3Config;
-use crate::models::qwen3::Mlp;
 use crate::ops::{self, MoeRouting};
 use crate::profile;
 use crate::profiler::Section;
@@ -14,7 +12,7 @@ use crate::tensor::Tensor;
 pub struct SparseMoe {
     /// router, `[num_experts, hidden]`
     pub gate: Tensor,
-    pub experts: Vec<Mlp>,
+    pub experts: Vec<ExpertWeights>,
     pub top_k: usize,
     pub norm_topk_prob: bool,
 }
@@ -28,11 +26,11 @@ impl SparseMoe {
         let experts = (0..cfg.num_experts)
             .map(|e| {
                 let ep = format!("{p}experts.{e}.");
-                Ok(Mlp {
-                    gate_proj: wl.load(&format!("{ep}gate_proj.weight"))?,
-                    up_proj: wl.load(&format!("{ep}up_proj.weight"))?,
-                    down_proj: wl.load(&format!("{ep}down_proj.weight"))?,
-                })
+                ExpertWeights::new(
+                    wl.load(&format!("{ep}gate_proj.weight"))?,
+                    wl.load(&format!("{ep}up_proj.weight"))?,
+                    wl.load(&format!("{ep}down_proj.weight"))?,
+                )
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(SparseMoe { gate, experts, top_k: cfg.num_experts_per_tok, norm_topk_prob: cfg.norm_topk_prob })
@@ -52,27 +50,25 @@ impl SparseMoe {
         let routing = MoeRouting::new(&ids, self.top_k, self.num_experts())?;
         let gathered = profile!(Section::ExpertScatter, routing.gather(h.as_slice::<f32>(), d));
 
-        // carve the output into one disjoint block per active expert
-        let mut expert_out = vec![0f32; gathered.len()];
-        let mut jobs = Vec::new();
-        let mut rest = expert_out.as_mut_slice();
-        for e in 0..self.num_experts() {
-            let (mine, tail) = rest.split_at_mut(routing.tokens_for(e) * d);
-            rest = tail;
-            if !mine.is_empty() {
-                let x = &gathered[routing.expert_offsets[e] * d..routing.expert_offsets[e + 1] * d];
-                jobs.push((e, x, mine));
+        // every active expert goes to the executor; workers steal row
+        // chunks across all of them
+        let expert_out = profile!(Section::Experts, {
+            let exec = expert::global();
+            let jobs = routing
+                .active_experts()
+                .map(|e| {
+                    let rows = routing.expert_offsets[e] * d..routing.expert_offsets[e + 1] * d;
+                    let x = gathered[rows.clone()].to_vec();
+                    Ok((rows, exec.submit(self.experts[e].clone(), x, routing.tokens_for(e), false)?))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            exec.wait_all();
+            let mut out = vec![0f32; gathered.len()];
+            for (rows, job) in jobs {
+                out[rows].copy_from_slice(&job.take()?);
             }
-        }
-        profile!(
-            Section::Experts,
-            jobs.into_par_iter().try_for_each(|(e, x, out)| -> Result<()> {
-                let n = x.len() / d;
-                let y = self.experts[e].forward(&Tensor::from_f32(x, &[n, d])?)?;
-                out.copy_from_slice(y.as_slice::<f32>());
-                Ok(())
-            })?
-        );
+            out
+        });
 
         let y = profile!(Section::ExpertScatter, routing.scatter(&expert_out, &weights, d));
         Tensor::from_f32(&y, h.shape())
