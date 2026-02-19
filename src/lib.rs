@@ -6,6 +6,7 @@ pub mod dtype;
 pub mod error;
 pub mod kvcache;
 pub mod models;
+pub mod moe_cache;
 pub mod ops;
 pub mod profiler;
 pub mod safetensors;
