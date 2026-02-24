@@ -205,42 +205,104 @@ impl ModelLoader {
     }
 }
 
-/// Write tensors to a single safetensors file (used for test fixtures and the
-/// quantization tool). Tensors are stored in name order.
+/// Name, dtype and shape of a tensor about to be written.
+#[derive(Debug, Clone)]
+pub struct TensorEntry {
+    pub name: String,
+    pub dtype: DType,
+    pub shape: Vec<usize>,
+}
+
+impl TensorEntry {
+    fn len(&self) -> usize {
+        self.shape.iter().product::<usize>() * self.dtype.size()
+    }
+}
+
+/// Writes a safetensors file whose header is known up front, one tensor at
+/// a time, so large checkpoints can be converted without holding a whole
+/// shard in memory.
+pub struct StreamWriter {
+    path: PathBuf,
+    f: std::io::BufWriter<File>,
+    entries: Vec<TensorEntry>,
+    next: usize,
+}
+
+impl StreamWriter {
+    /// Tensors must later be written in exactly the order of `entries`.
+    pub fn create(path: impl AsRef<Path>, entries: Vec<TensorEntry>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let mut header = serde_json::Map::new();
+        let mut offset = 0usize;
+        for e in &entries {
+            header.insert(
+                e.name.clone(),
+                serde_json::json!({
+                    "dtype": e.dtype.safetensors_name(),
+                    "shape": e.shape,
+                    "data_offsets": [offset, offset + e.len()],
+                }),
+            );
+            offset += e.len();
+        }
+        let mut header_bytes =
+            serde_json::to_vec(&serde_json::Value::Object(header)).map_err(|e| Error::json(&path, e))?;
+        // keep the data section 8-byte aligned
+        while !(8 + header_bytes.len()).is_multiple_of(8) {
+            header_bytes.push(b' ');
+        }
+        let mut f = std::io::BufWriter::new(File::create(&path).map_err(|e| Error::io(&path, e))?);
+        f.write_all(&(header_bytes.len() as u64).to_le_bytes()).map_err(|e| Error::io(&path, e))?;
+        f.write_all(&header_bytes).map_err(|e| Error::io(&path, e))?;
+        Ok(StreamWriter { path, f, entries, next: 0 })
+    }
+
+    pub fn write(&mut self, name: &str, bytes: &[u8]) -> Result<()> {
+        let Some(e) = self.entries.get(self.next) else {
+            return Err(Error::Safetensors(format!("{}: unexpected tensor {name}", self.path.display())));
+        };
+        if e.name != name || e.len() != bytes.len() {
+            return Err(Error::Safetensors(format!(
+                "{}: expected {} ({} bytes), got {name} ({} bytes)",
+                self.path.display(),
+                e.name,
+                e.len(),
+                bytes.len()
+            )));
+        }
+        self.f.write_all(bytes).map_err(|err| Error::io(&self.path, err))?;
+        self.next += 1;
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<()> {
+        if self.next != self.entries.len() {
+            return Err(Error::Safetensors(format!(
+                "{}: {} of {} tensors written",
+                self.path.display(),
+                self.next,
+                self.entries.len()
+            )));
+        }
+        self.f.flush().map_err(|e| Error::io(&self.path, e))
+    }
+}
+
+/// Write tensors to a single safetensors file (used for test fixtures).
+/// Tensors are stored in name order.
 pub fn save(path: impl AsRef<Path>, tensors: &[(String, Tensor)]) -> Result<()> {
-    let path = path.as_ref();
     let mut sorted: Vec<&(String, Tensor)> = tensors.iter().collect();
     sorted.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut header = serde_json::Map::new();
-    let mut offset = 0usize;
-    for (name, t) in &sorted {
-        let len = t.size_in_bytes();
-        header.insert(
-            name.clone(),
-            serde_json::json!({
-                "dtype": t.dtype().safetensors_name(),
-                "shape": t.shape(),
-                "data_offsets": [offset, offset + len],
-            }),
-        );
-        offset += len;
+    let entries = sorted
+        .iter()
+        .map(|(name, t)| TensorEntry { name: name.clone(), dtype: t.dtype(), shape: t.shape().to_vec() })
+        .collect();
+    let mut w = StreamWriter::create(path, entries)?;
+    for (name, t) in sorted {
+        w.write(name, t.bytes())?;
     }
-    let mut header_bytes = serde_json::to_vec(&serde_json::Value::Object(header)).map_err(|e| Error::json(path, e))?;
-    // keep the data section 8-byte aligned
-    while (8 + header_bytes.len()) % 8 != 0 {
-        header_bytes.push(b' ');
-    }
-
-    let mut f = std::io::BufWriter::new(File::create(path).map_err(|e| Error::io(path, e))?);
-    let io = |e| Error::io(path, e);
-    f.write_all(&(header_bytes.len() as u64).to_le_bytes()).map_err(io)?;
-    f.write_all(&header_bytes).map_err(io)?;
-    for (_, t) in &sorted {
-        f.write_all(t.bytes()).map_err(io)?;
-    }
-    f.flush().map_err(io)?;
-    Ok(())
+    w.finish()
 }
 
 #[cfg(test)]

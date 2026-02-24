@@ -38,9 +38,12 @@ impl BlockLayout {
         if sn == 0 || sk == 0 {
             return Err(Error::Shape(format!("empty block scale {scale_shape:?}")));
         }
-        // The usual case: 128x128 blocks with a partial last block.
-        if sn == n.div_ceil(FP8_BLOCK) && sk == k.div_ceil(FP8_BLOCK) {
-            return Ok(BlockLayout { block_n: FP8_BLOCK, block_k: FP8_BLOCK, scale_cols: sk });
+        // Square power-of-two blocks with partial last blocks: 128x128 is
+        // what Qwen ships, other sizes come from `quantize --block`.
+        for block in std::iter::once(FP8_BLOCK).chain((4..=10).map(|p| 1usize << p)) {
+            if sn == n.div_ceil(block) && sk == k.div_ceil(block) {
+                return Ok(BlockLayout { block_n: block, block_k: block, scale_cols: sk });
+            }
         }
         // Otherwise assume uniform blocks (covers per-tensor [1, 1] scales).
         Ok(BlockLayout { block_n: n.div_ceil(sn), block_k: k.div_ceil(sk), scale_cols: sk })

@@ -9,6 +9,7 @@ pub mod models;
 pub mod moe_cache;
 pub mod ops;
 pub mod profiler;
+pub mod quantize;
 pub mod safetensors;
 pub mod sampling;
 pub mod tensor;
