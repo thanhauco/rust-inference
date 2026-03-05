@@ -30,6 +30,9 @@ pub enum Error {
 
     #[error("config: {0}")]
     Config(String),
+
+    #[error("cuda: {0}")]
+    Cuda(String),
 }
 
 impl Error {

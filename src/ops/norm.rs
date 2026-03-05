@@ -12,6 +12,10 @@ fn rms_scale(row: &[f32], eps: f32) -> f32 {
 /// In-place RMSNorm over consecutive groups of `group` elements (the last
 /// dimension, or `head_dim` for the per-head q/k norms).
 pub fn rms_norm(x: &mut Tensor, weight: &Tensor, eps: f32, group: Option<usize>) -> Result<()> {
+    #[cfg(feature = "cuda")]
+    if x.device() == crate::tensor::Device::Cuda {
+        return crate::cuda::ops::rms_norm(x, weight, eps, group.unwrap_or(*x.shape().last().unwrap()));
+    }
     expect_f32(x, "rms_norm")?;
     let group = group.unwrap_or_else(|| *x.shape().last().unwrap());
     if weight.numel() != group || !x.numel().is_multiple_of(group) {
@@ -29,6 +33,10 @@ pub fn rms_norm(x: &mut Tensor, weight: &Tensor, eps: f32, group: Option<usize>)
 
 /// Fused residual add + norm: `residual += x; x = rmsnorm(residual) * w`.
 pub fn add_rms_norm(x: &mut Tensor, residual: &mut Tensor, weight: &Tensor, eps: f32) -> Result<()> {
+    #[cfg(feature = "cuda")]
+    if x.device() == crate::tensor::Device::Cuda {
+        return crate::cuda::ops::add_rms_norm(x, residual, weight, eps);
+    }
     expect_f32(x, "add_rms_norm")?;
     expect_f32(residual, "add_rms_norm")?;
     if x.shape() != residual.shape() {

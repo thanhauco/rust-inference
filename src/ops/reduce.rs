@@ -7,6 +7,10 @@ use crate::tensor::Tensor;
 /// Index of the maximum along the last dimension, for every row. Ties go to
 /// the first occurrence (like `torch.argmax`).
 pub fn argmax_last(x: &Tensor) -> Result<Vec<u32>> {
+    #[cfg(feature = "cuda")]
+    if x.device() == crate::tensor::Device::Cuda {
+        return crate::cuda::ops::argmax_last(x);
+    }
     expect_f32(x, "argmax_last")?;
     let n = *x.shape().last().unwrap();
     Ok(x.as_slice::<f32>()
@@ -30,6 +34,10 @@ pub fn argmax_last(x: &Tensor) -> Result<Vec<u32>> {
 /// the selected logits only, which equals renormalising the full softmax;
 /// without it they are the full-softmax probabilities.
 pub fn topk_softmax(logits: &Tensor, k: usize, normalize: bool) -> Result<(Vec<u32>, Vec<f32>)> {
+    #[cfg(feature = "cuda")]
+    if logits.device() == crate::tensor::Device::Cuda {
+        return crate::cuda::ops::topk_softmax(logits, k, normalize);
+    }
     expect_f32(logits, "topk_softmax")?;
     let e = *logits.shape().last().unwrap();
     if k == 0 || k > e {

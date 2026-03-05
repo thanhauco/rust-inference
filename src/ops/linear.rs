@@ -5,6 +5,10 @@ use crate::tensor::{Device, Tensor};
 
 /// `y = x W^T` with `x: [..., K]` and `w: [N, K]`; returns `[..., N]`.
 pub fn linear(x: &Tensor, w: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if x.device() == Device::Cuda {
+        return crate::cuda::ops::linear(x, w);
+    }
     expect_f32(x, "linear")?;
     let k = *x.shape().last().unwrap();
     let m = x.numel() / k.max(1);

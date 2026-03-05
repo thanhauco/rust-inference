@@ -50,6 +50,10 @@ impl RotaryEmbedding {
 /// Rotate `x: [B, S, H, Dh]` in place with `cos`/`sin: [B, S, Dh]`
 /// (rotate-half convention).
 pub fn apply_rope(x: &mut Tensor, cos: &Tensor, sin: &Tensor) -> Result<()> {
+    #[cfg(feature = "cuda")]
+    if x.device() == Device::Cuda {
+        return crate::cuda::ops::apply_rope(x, cos, sin);
+    }
     expect_f32(x, "apply_rope")?;
     if x.ndim() != 4 {
         return Err(Error::Shape(format!("apply_rope expects [B,S,H,Dh], got {:?}", x.shape())));

@@ -8,6 +8,10 @@ use crate::tensor::{Device, Tensor};
 /// Look up rows of `table: [vocab, dim]` for `ids` (U32, any shape).
 /// Returns `[*ids.shape, dim]` in F32.
 pub fn embedding(ids: &Tensor, table: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if table.device() == Device::Cuda {
+        return crate::cuda::ops::embedding(ids, table);
+    }
     if ids.dtype() != DType::U32 {
         return Err(Error::Unsupported(format!("embedding ids must be U32, got {}", ids.dtype())));
     }

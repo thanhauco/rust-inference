@@ -31,6 +31,10 @@ impl PagedAttention {
     /// Attention output for `q: [B, S, H, Dh]`, after the new keys/values
     /// were appended to `cache`.
     pub fn forward(&self, q: &Tensor, cache: &KvCache) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if q.device() == crate::tensor::Device::Cuda {
+            return crate::cuda::ops::paged_attention(q, cache, self.num_heads, self.scale);
+        }
         expect_f32(q, "attention")?;
         let (h, hkv, dh) = (self.num_heads, self.num_kv_heads, self.head_dim);
         if q.ndim() != 4 || q.dim(2) != h || q.dim(3) != dh || q.dim(0) != cache.batch_size() {

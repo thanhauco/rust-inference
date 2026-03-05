@@ -13,6 +13,10 @@ pub(crate) fn silu(x: f32) -> f32 {
 
 /// `x += y` (same shape).
 pub fn add_inplace(x: &mut Tensor, y: &Tensor) -> Result<()> {
+    #[cfg(feature = "cuda")]
+    if x.device() == crate::tensor::Device::Cuda {
+        return crate::cuda::ops::add_inplace(x, y);
+    }
     expect_f32(x, "add_inplace")?;
     expect_f32(y, "add_inplace")?;
     if x.numel() != y.numel() {
@@ -29,6 +33,10 @@ pub fn add_inplace(x: &mut Tensor, y: &Tensor) -> Result<()> {
 
 /// SwiGLU: `gate = silu(gate) * up`.
 pub fn swiglu(gate: &mut Tensor, up: &Tensor) -> Result<()> {
+    #[cfg(feature = "cuda")]
+    if gate.device() == crate::tensor::Device::Cuda {
+        return crate::cuda::ops::swiglu(gate, up);
+    }
     expect_f32(gate, "swiglu")?;
     expect_f32(up, "swiglu")?;
     if gate.numel() != up.numel() {

@@ -2,6 +2,8 @@
 
 pub mod attention;
 pub mod cpu;
+#[cfg(feature = "cuda")]
+pub mod cuda;
 pub mod dtype;
 pub mod error;
 pub mod kvcache;

@@ -24,6 +24,9 @@ pub struct KvCache {
     /// `[batch_size * max_pages_per_seq]`, -1 = unmapped
     page_table: Vec<i32>,
     seq_lens: Vec<usize>,
+    /// device copies of `page_table` and of the pre-append lengths
+    #[cfg(feature = "cuda")]
+    device_tables: Option<(crate::cuda::DeviceBuffer, crate::cuda::DeviceBuffer)>,
 }
 
 impl KvCache {
@@ -48,7 +51,19 @@ impl KvCache {
             free_pages: (0..max_pages).rev().collect(),
             page_table: vec![-1; batch_size * max_pages_per_seq],
             seq_lens: vec![0; batch_size],
+            #[cfg(feature = "cuda")]
+            device_tables: (device == Device::Cuda).then(|| {
+                let table = crate::cuda::DeviceBuffer::alloc(batch_size * max_pages_per_seq * 4);
+                let lens = crate::cuda::DeviceBuffer::alloc(batch_size * 4);
+                (table.expect("device allocation failed"), lens.expect("device allocation failed"))
+            }),
         }
+    }
+
+    /// Device page table and pre-append lengths (`int32`), CUDA caches only.
+    #[cfg(feature = "cuda")]
+    pub fn device_tables(&self) -> Option<(u64, u64)> {
+        self.device_tables.as_ref().map(|(t, l)| (t.ptr(), l.ptr()))
     }
 
     pub fn num_kv_heads(&self) -> usize {
@@ -108,6 +123,14 @@ impl KvCache {
                 }
             }
         }
+        #[cfg(feature = "cuda")]
+        if let Some((table, lens)) = &self.device_tables {
+            // pageable sources: the driver stages them before returning
+            let t: Vec<u8> = self.page_table.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let l: Vec<u8> = self.seq_lens.iter().flat_map(|&v| (v as i32).to_le_bytes()).collect();
+            table.upload(0, &t)?;
+            lens.upload(0, &l)?;
+        }
         Ok(())
     }
 
@@ -139,6 +162,14 @@ impl KvCache {
         }
         let s = k.dim(1);
         self.prepare(s)?;
+        #[cfg(feature = "cuda")]
+        if self.device_tables.is_some() {
+            crate::cuda::ops::kv_append(self, k, v)?;
+            for len in &mut self.seq_lens {
+                *len += s;
+            }
+            return Ok(());
+        }
         let (hkv, dh) = (self.num_kv_heads, self.head_dim);
         let offsets: Vec<(usize, usize)> = (0..self.batch_size)
             .flat_map(|b| (0..s).map(move |t| (b, t)))

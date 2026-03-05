@@ -112,11 +112,15 @@ impl CpuBuffer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Device {
     Cpu,
+    #[cfg(feature = "cuda")]
+    Cuda,
 }
 
 #[derive(Clone)]
 pub enum Storage {
     Cpu(Arc<CpuBuffer>),
+    #[cfg(feature = "cuda")]
+    Cuda(Arc<crate::cuda::DeviceBuffer>),
 }
 
 #[derive(Clone)]
@@ -146,17 +150,36 @@ pub fn numel(shape: &[usize]) -> usize {
 }
 
 impl Tensor {
+    /// Zero-filled tensor. Panics if a device allocation fails (like `Vec`
+    /// does on OOM); see `try_zeros`.
     pub fn zeros(shape: &[usize], dtype: DType, device: Device) -> Self {
+        Self::try_zeros(shape, dtype, device).expect("device allocation failed")
+    }
+
+    pub fn try_zeros(shape: &[usize], dtype: DType, device: Device) -> Result<Self> {
+        let len = numel(shape) * dtype.size();
+        let storage = match device {
+            Device::Cpu => Storage::Cpu(Arc::new(CpuBuffer::Owned(AlignedBytes::zeroed(len)))),
+            #[cfg(feature = "cuda")]
+            Device::Cuda => Storage::Cuda(Arc::new(crate::cuda::DeviceBuffer::zeroed(len)?)),
+        };
+        Ok(Tensor { shape: shape.to_vec(), dtype, storage, offset: 0, scale: None })
+    }
+
+    /// Uninitialised device tensor (CPU tensors are zeroed anyway).
+    pub fn empty(shape: &[usize], dtype: DType, device: Device) -> Result<Self> {
         match device {
-            Device::Cpu => {
-                let bytes = AlignedBytes::zeroed(numel(shape) * dtype.size());
-                Tensor {
+            Device::Cpu => Self::try_zeros(shape, dtype, device),
+            #[cfg(feature = "cuda")]
+            Device::Cuda => {
+                let buf = crate::cuda::DeviceBuffer::alloc(numel(shape) * dtype.size())?;
+                Ok(Tensor {
                     shape: shape.to_vec(),
                     dtype,
-                    storage: Storage::Cpu(Arc::new(CpuBuffer::Owned(bytes))),
+                    storage: Storage::Cuda(Arc::new(buf)),
                     offset: 0,
                     scale: None,
-                }
+                })
             }
         }
     }
@@ -239,6 +262,8 @@ impl Tensor {
     pub fn device(&self) -> Device {
         match self.storage {
             Storage::Cpu(_) => Device::Cpu,
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => Device::Cuda,
         }
     }
 
@@ -303,6 +328,8 @@ impl Tensor {
     fn storage_len(&self) -> usize {
         match &self.storage {
             Storage::Cpu(b) => b.len(),
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(b) => b.len(),
         }
     }
 
@@ -328,9 +355,12 @@ impl Tensor {
 
     // -- CPU byte / element access -------------------------------------------
 
+    /// Host bytes of a CPU tensor. Panics for device tensors (use `to_cpu`).
     pub fn bytes(&self) -> &[u8] {
         match &self.storage {
             Storage::Cpu(b) => &b.bytes()[self.offset..self.offset + self.size_in_bytes()],
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => panic!("bytes() on a CUDA tensor; call to_cpu() first"),
         }
     }
 
@@ -344,6 +374,8 @@ impl Tensor {
                 Some(CpuBuffer::Mapped { .. }) => Err(Error::Unsupported("mutating a memory-mapped tensor".into())),
                 None => Err(Error::Unsupported("mutating a shared tensor".into())),
             },
+            #[cfg(feature = "cuda")]
+            Storage::Cuda(_) => Err(Error::Unsupported("host access to a CUDA tensor".into())),
         }
     }
 
@@ -372,6 +404,9 @@ impl Tensor {
     /// Owned copy of the data, decoded to f32 (works for any float dtype; the
     /// FP8 block scale is *not* applied).
     pub fn to_f32_vec(&self) -> Result<Vec<f32>> {
+        if self.device() != Device::Cpu {
+            return self.to_cpu()?.to_f32_vec();
+        }
         Ok(match self.dtype {
             DType::F32 => self.as_slice::<f32>().to_vec(),
             DType::BF16 => self.as_slice::<u16>().iter().map(|&b| dtype::bf16_to_f32(b)).collect(),
@@ -385,6 +420,9 @@ impl Tensor {
     pub fn to_dtype(&self, dtype: DType) -> Result<Tensor> {
         if dtype == self.dtype {
             return Ok(self.clone());
+        }
+        if self.device() != Device::Cpu {
+            return Err(Error::Unsupported("to_dtype on a device tensor".into()));
         }
         let vals = self.to_f32_vec()?;
         let mut out = Tensor::zeros(&self.shape, dtype, Device::Cpu);
@@ -412,10 +450,81 @@ impl Tensor {
 
     /// Deep copy into fresh owned storage (scale is shared).
     pub fn deep_clone(&self) -> Tensor {
+        #[cfg(feature = "cuda")]
+        if self.device() == Device::Cuda {
+            let mut out = crate::cuda::ops::copy(self).expect("device copy failed");
+            out.scale = self.scale.clone();
+            return out;
+        }
         let mut out = Tensor::zeros(&self.shape, self.dtype, self.device());
         out.bytes_mut().expect("fresh tensor").copy_from_slice(self.bytes());
         out.scale = self.scale.clone();
         out
+    }
+
+    /// Copy to `device` (the block scale moves along). Same-device is a
+    /// shallow clone.
+    pub fn to_device(&self, device: Device) -> Result<Tensor> {
+        if device == self.device() {
+            return Ok(self.clone());
+        }
+        #[cfg(not(feature = "cuda"))]
+        unreachable!("only one device without the cuda feature");
+        #[cfg(feature = "cuda")]
+        {
+            let scale = match &self.scale {
+                Some(s) => Some(Arc::new(s.to_device(device)?)),
+                None => None,
+            };
+            let mut out = match (&self.storage, device) {
+                (Storage::Cpu(_), Device::Cuda) => {
+                    let buf = crate::cuda::DeviceBuffer::alloc(self.size_in_bytes())?;
+                    buf.upload(0, self.bytes())?;
+                    Tensor {
+                        shape: self.shape.clone(),
+                        dtype: self.dtype,
+                        storage: Storage::Cuda(Arc::new(buf)),
+                        offset: 0,
+                        scale: None,
+                    }
+                }
+                (Storage::Cuda(buf), Device::Cpu) => {
+                    let mut out = Tensor::zeros(&self.shape, self.dtype, Device::Cpu);
+                    buf.download(self.offset, out.bytes_mut()?)?;
+                    out
+                }
+                _ => unreachable!("same-device copies return early"),
+            };
+            out.scale = scale;
+            Ok(out)
+        }
+    }
+
+    pub fn to_cpu(&self) -> Result<Tensor> {
+        self.to_device(Device::Cpu)
+    }
+
+    /// Device address of element 0. Panics for CPU tensors.
+    #[cfg(feature = "cuda")]
+    pub fn device_ptr(&self) -> u64 {
+        match &self.storage {
+            Storage::Cuda(b) => b.ptr() + self.offset as u64,
+            Storage::Cpu(_) => panic!("device_ptr() on a CPU tensor"),
+        }
+    }
+
+    /// Wrap a device buffer (used for expert slots and op outputs).
+    #[cfg(feature = "cuda")]
+    pub fn from_device_buffer(
+        buf: Arc<crate::cuda::DeviceBuffer>,
+        shape: &[usize],
+        dtype: DType,
+        offset: usize,
+    ) -> Result<Self> {
+        if offset + numel(shape) * dtype.size() > buf.len() {
+            return Err(Error::Shape(format!("{shape:?} {dtype} @ {offset} exceeds device buffer of {}", buf.len())));
+        }
+        Ok(Tensor { shape: shape.to_vec(), dtype, storage: Storage::Cuda(buf), offset, scale: None })
     }
 }
 
