@@ -94,6 +94,26 @@ struct Args {
     /// Sampling seed
     #[arg(long, default_value_t = 0x5EED)]
     seed: u64,
+
+    /// Run on the GPU (needs the `cuda` feature)
+    #[arg(long, value_enum, default_value_t = DeviceArg::Cpu)]
+    device: DeviceArg,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum DeviceArg {
+    Cpu,
+    Cuda,
+}
+
+fn load_model(args: &Args) -> Result<Box<dyn LanguageModel>, Box<dyn std::error::Error>> {
+    match args.device {
+        DeviceArg::Cpu => Ok(models::from_pretrained(&args.model_dir)?),
+        #[cfg(feature = "cuda")]
+        DeviceArg::Cuda => Ok(models::from_pretrained_on(&args.model_dir, garlic::Device::Cuda)?),
+        #[cfg(not(feature = "cuda"))]
+        DeviceArg::Cuda => Err("this build has no CUDA support (rebuild with --features cuda)".into()),
+    }
 }
 
 /// Energy measurement following the C++ runner: let the previous phase's
@@ -132,8 +152,17 @@ impl Power {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+fn main() -> std::process::ExitCode {
+    match run(Args::parse()) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(n) = args.threads {
         rayon::ThreadPoolBuilder::new().num_threads(n).build_global()?;
     }
@@ -144,7 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tokenizer = BpeTokenizer::load(args.tokenizer.as_ref().unwrap_or(&args.model_dir))?;
     let t0 = Instant::now();
-    let model = power.measure("MODEL LOADING", || models::from_pretrained(&args.model_dir))?;
+    let model = power.measure("MODEL LOADING", || load_model(&args))?;
     eprintln!(
         "loaded {:?} ({} layers) in {:.2}s",
         model.config().architecture,
@@ -218,7 +247,7 @@ fn generate(
         seed: args.seed,
     });
     let mut history = prompt_ids.to_vec();
-    let mut next = profile!(Section::Sampling, sampler.sample(logits.as_slice::<f32>(), &history));
+    let mut next = profile!(Section::Sampling, sampler.sample(&logits.to_f32_vec()?, &history));
     let prefill_s = t_prefill.elapsed().as_secs_f64();
 
     let t_decode = Instant::now();
@@ -240,7 +269,7 @@ fn generate(
             LogitsMode::Last,
         )?;
         history.push(next);
-        next = profile!(Section::Sampling, sampler.sample(logits.as_slice::<f32>(), &history));
+        next = profile!(Section::Sampling, sampler.sample(&logits.to_f32_vec()?, &history));
         generated += 1;
     }
     writeln!(stdout, "{}", stream.finish())?;

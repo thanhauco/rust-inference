@@ -15,6 +15,9 @@ pub struct SparseMoe {
     pub experts: Vec<ExpertWeights>,
     pub top_k: usize,
     pub norm_topk_prob: bool,
+    /// device router and experts, once the model is moved to the GPU
+    #[cfg(feature = "cuda")]
+    pub gpu: Option<(Tensor, crate::cuda::moe::GpuExperts)>,
 }
 
 impl SparseMoe {
@@ -33,7 +36,14 @@ impl SparseMoe {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(SparseMoe { gate, experts, top_k: cfg.num_experts_per_tok, norm_topk_prob: cfg.norm_topk_prob })
+        Ok(SparseMoe {
+            gate,
+            experts,
+            top_k: cfg.num_experts_per_tok,
+            norm_topk_prob: cfg.norm_topk_prob,
+            #[cfg(feature = "cuda")]
+            gpu: None,
+        })
     }
 
     pub fn num_experts(&self) -> usize {
@@ -42,6 +52,15 @@ impl SparseMoe {
 
     /// `h: [B, S, D]` -> `[B, S, D]`.
     pub fn forward(&self, h: &Tensor) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if h.device() == crate::tensor::Device::Cuda {
+            let (router, experts) =
+                self.gpu.as_ref().ok_or_else(|| Error::Cuda("MoE layer has not been moved to the GPU".into()))?;
+            return profile!(
+                Section::Experts,
+                crate::cuda::moe::forward(h, router, self.top_k, self.norm_topk_prob, self.num_experts(), experts)
+            );
+        }
         let d = *h.shape().last().unwrap();
         let (ids, weights) = profile!(Section::Router, {
             let logits = ops::linear(h, &self.gate)?;

@@ -9,6 +9,7 @@
 //! transfer (expert weight uploads) and a lower-priority secondary stream.
 
 mod buffer;
+pub mod moe;
 pub mod ops;
 
 use std::collections::HashMap;

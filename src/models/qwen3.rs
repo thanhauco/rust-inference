@@ -44,13 +44,16 @@ pub struct DecoderLayer {
 }
 
 pub struct Qwen3 {
-    config: ModelConfig,
+    pub(crate) config: ModelConfig,
     pub embed_tokens: Tensor,
     pub layers: Vec<DecoderLayer>,
     pub norm: Tensor,
     pub lm_head: Tensor,
     rope: RotaryEmbedding,
     attn: PagedAttention,
+    pub(crate) device: Device,
+    /// activation / KV-cache dtype: F32 on the CPU, BF16 or F16 on the GPU
+    pub(crate) act_dtype: DType,
 }
 
 impl Attention {
@@ -187,13 +190,49 @@ impl Qwen3 {
 
         let rope = RotaryEmbedding::new(cfg.rope_theta, cfg.head_dim());
         let attn = PagedAttention::new(cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim());
-        Ok(Qwen3 { config, embed_tokens, layers, norm, lm_head, rope, attn })
+        Ok(Qwen3 {
+            config,
+            embed_tokens,
+            layers,
+            norm,
+            lm_head,
+            rope,
+            attn,
+            device: Device::Cpu,
+            act_dtype: DType::F32,
+        })
+    }
+}
+
+/// `[B, S, D]` -> `[B, 1, D]` keeping each sequence's last position.
+fn last_positions(hidden: &Tensor, b: usize, s: usize) -> Result<Tensor> {
+    let d = hidden.dim(2);
+    match hidden.device() {
+        Device::Cpu => {
+            let all = hidden.as_slice::<f32>();
+            let last: Vec<f32> = (0..b).flat_map(|bi| all[((bi * s) + s - 1) * d..][..d].iter().copied()).collect();
+            Tensor::from_f32(&last, &[b, 1, d])
+        }
+        #[cfg(feature = "cuda")]
+        Device::Cuda => {
+            let es = hidden.dtype().size();
+            let out = Tensor::empty(&[b, 1, d], hidden.dtype(), Device::Cuda)?;
+            for bi in 0..b {
+                let src = hidden.view(&[d], ((bi * s) + s - 1) * d * es)?;
+                crate::cuda::ops::copy_into(&out.view(&[d], bi * d * es)?, &src)?;
+            }
+            Ok(out)
+        }
     }
 }
 
 impl LanguageModel for Qwen3 {
     fn config(&self) -> &ModelConfig {
         &self.config
+    }
+
+    fn device(&self) -> Device {
+        self.device
     }
 
     fn new_kv_caches(&self, batch_size: usize, max_pages: usize, max_pages_per_seq: usize) -> Vec<KvCache> {
@@ -206,8 +245,8 @@ impl LanguageModel for Qwen3 {
                     max_pages,
                     batch_size,
                     max_pages_per_seq,
-                    DType::F32,
-                    Device::Cpu,
+                    self.act_dtype,
+                    self.device,
                 )
             })
             .collect()
@@ -233,15 +272,15 @@ impl LanguageModel for Qwen3 {
         }
         let (b, s) = (input_ids.dim(0), input_ids.dim(1));
         let mut hidden = profile!(Section::Embedding, ops::embedding(input_ids, &self.embed_tokens)?);
-        let (cos, sin) = profile!(Section::Rope, self.rope.cos_sin(positions)?);
+        let (cos, sin) = profile!(Section::Rope, {
+            let (c, s) = self.rope.cos_sin(&positions.to_cpu()?)?;
+            (c.to_device(self.device)?, s.to_device(self.device)?)
+        });
         for (layer, cache) in self.layers.iter().zip(caches.iter_mut()) {
             hidden = layer.forward(hidden, cfg, &cos, &sin, cache, &self.attn)?;
         }
         if mode == LogitsMode::Last && s > 1 {
-            let d = cfg.hidden_size;
-            let all = hidden.as_slice::<f32>();
-            let last: Vec<f32> = (0..b).flat_map(|bi| all[((bi * s) + s - 1) * d..][..d].iter().copied()).collect();
-            hidden = Tensor::from_f32(&last, &[b, 1, d])?;
+            hidden = last_positions(&hidden, b, s)?;
         }
         profile!(Section::Norm, ops::rms_norm(&mut hidden, &self.norm, cfg.rms_norm_eps, None)?);
         profile!(Section::LmHead, ops::linear(&hidden, &self.lm_head))

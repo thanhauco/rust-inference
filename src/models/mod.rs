@@ -1,6 +1,8 @@
 //! Model definitions.
 
 pub mod config;
+#[cfg(feature = "cuda")]
+pub mod cuda;
 pub mod moe;
 pub mod qwen3;
 
@@ -11,7 +13,7 @@ pub use qwen3::Qwen3;
 
 use crate::error::Result;
 use crate::kvcache::KvCache;
-use crate::tensor::Tensor;
+use crate::tensor::{Device, Tensor};
 
 /// Which positions to produce logits for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +26,9 @@ pub enum LogitsMode {
 
 pub trait LanguageModel: Send + Sync {
     fn config(&self) -> &ModelConfig;
+
+    /// Where activations and the KV cache live.
+    fn device(&self) -> Device;
 
     /// One KV cache per decoder layer.
     fn new_kv_caches(&self, batch_size: usize, max_pages: usize, max_pages_per_seq: usize) -> Vec<KvCache>;
@@ -41,8 +46,18 @@ pub trait LanguageModel: Send + Sync {
 
 /// Load whichever supported architecture `dir/config.json` describes.
 pub fn from_pretrained(dir: impl AsRef<Path>) -> Result<Box<dyn LanguageModel>> {
+    from_pretrained_on(dir, Device::Cpu)
+}
+
+/// Load a checkpoint onto `device` (default CUDA options for the GPU).
+pub fn from_pretrained_on(dir: impl AsRef<Path>, device: Device) -> Result<Box<dyn LanguageModel>> {
     let config = ModelConfig::from_pretrained(&dir)?;
-    Ok(match config.architecture {
-        Architecture::Qwen3 | Architecture::Qwen3Moe => Box::new(Qwen3::load(config, dir)?),
+    let model = match config.architecture {
+        Architecture::Qwen3 | Architecture::Qwen3Moe => Qwen3::load(config, dir)?,
+    };
+    Ok(match device {
+        Device::Cpu => Box::new(model),
+        #[cfg(feature = "cuda")]
+        Device::Cuda => Box::new(model.to_cuda()?),
     })
 }
