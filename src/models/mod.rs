@@ -58,6 +58,6 @@ pub fn from_pretrained_on(dir: impl AsRef<Path>, device: Device) -> Result<Box<d
     Ok(match device {
         Device::Cpu => Box::new(model),
         #[cfg(feature = "cuda")]
-        Device::Cuda => Box::new(model.to_cuda()?),
+        Device::Cuda => Box::new(model.to_cuda(&cuda::CudaOptions::default())?),
     })
 }

@@ -4,8 +4,11 @@
 #![cfg(feature = "cuda")]
 
 use garlic::attention::PagedAttention;
+use garlic::cuda::moe::OffloadOptions;
 use garlic::kvcache::KvCache;
-use garlic::models::{self, LanguageModel, LogitsMode};
+use garlic::models::cuda::CudaOptions;
+use garlic::models::{self, LanguageModel, LogitsMode, ModelConfig, Qwen3};
+use garlic::moe_cache::Policy;
 use garlic::{DType, Device, Tensor, cuda, ops};
 
 fn have_gpu() -> bool {
@@ -159,5 +162,25 @@ fn models_match_cpu() {
         assert_eq!(gpu.device(), Device::Cuda);
         let c = cosine(&prefill_logits(&*gpu, &ids), &prefill_logits(&*cpu, &ids));
         assert!(c > 0.995, "{name}: cosine {c}");
+    }
+}
+
+#[test]
+fn offloaded_moe_matches_resident() {
+    if !have_gpu() {
+        return;
+    }
+    let dir = fixture("tiny-qwen3-moe-fp8");
+    let load = |offload: Option<OffloadOptions>| {
+        let cfg = ModelConfig::from_pretrained(&dir).unwrap();
+        Qwen3::load(cfg, &dir).unwrap().to_cuda(&CudaOptions { offload }).unwrap()
+    };
+    let ids = [5u32, 17, 300, 42, 8, 9, 100];
+    let resident = prefill_logits(&load(None), &ids);
+    for (resident_layers, policy) in [(0, Policy::Lru), (1, Policy::LayerDistance { num_layers: 2 })] {
+        let opts = OffloadOptions { slots: 3, resident_layers, policy };
+        let got = prefill_logits(&load(Some(opts)), &ids);
+        let c = cosine(&got, &resident);
+        assert!(c > 0.999, "{policy:?}: cosine {c}");
     }
 }

@@ -98,6 +98,19 @@ struct Args {
     /// Run on the GPU (needs the `cuda` feature)
     #[arg(long, value_enum, default_value_t = DeviceArg::Cpu)]
     device: DeviceArg,
+
+    /// GPU: offload MoE experts to pinned host memory with this many device
+    /// slots (default: offload only if the experts do not fit)
+    #[arg(long)]
+    expert_slots: Option<usize>,
+
+    /// GPU offload: MoE layers whose experts always stay on the device
+    #[arg(long, default_value_t = 0)]
+    resident_moe_layers: usize,
+
+    /// GPU offload: evict by recency instead of by upcoming layer
+    #[arg(long)]
+    lru: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -110,7 +123,20 @@ fn load_model(args: &Args) -> Result<Box<dyn LanguageModel>, Box<dyn std::error:
     match args.device {
         DeviceArg::Cpu => Ok(models::from_pretrained(&args.model_dir)?),
         #[cfg(feature = "cuda")]
-        DeviceArg::Cuda => Ok(models::from_pretrained_on(&args.model_dir, garlic::Device::Cuda)?),
+        DeviceArg::Cuda => {
+            use garlic::cuda::moe::OffloadOptions;
+            use garlic::models::cuda::CudaOptions;
+            use garlic::moe_cache::Policy;
+            let config = models::ModelConfig::from_pretrained(&args.model_dir)?;
+            let layers = config.config.num_hidden_layers;
+            let offload = args.expert_slots.map(|slots| OffloadOptions {
+                slots,
+                resident_layers: args.resident_moe_layers,
+                policy: if args.lru { Policy::Lru } else { Policy::LayerDistance { num_layers: layers } },
+            });
+            let model = models::Qwen3::load(config, &args.model_dir)?;
+            Ok(Box::new(model.to_cuda(&CudaOptions { offload })?))
+        }
         #[cfg(not(feature = "cuda"))]
         DeviceArg::Cuda => Err("this build has no CUDA support (rebuild with --features cuda)".into()),
     }

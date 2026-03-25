@@ -17,13 +17,15 @@
 
 use std::collections::HashMap;
 
+use crate::error::Result;
+
 /// `(layer, expert)`
 pub type ExpertKey = (usize, usize);
 
 /// Moves expert weights between host and device.
 pub trait Residency {
     /// Start loading `key` into the device slot freed by `reuse` (if any).
-    fn load(&mut self, key: ExpertKey, reuse: Option<ExpertKey>);
+    fn load(&mut self, key: ExpertKey, reuse: Option<ExpertKey>) -> Result<()>;
     /// Whether a load started for `key` has completed.
     fn is_ready(&self, key: ExpertKey) -> bool;
 }
@@ -125,15 +127,15 @@ impl<R: Residency> ExpertCache<R> {
 
     /// Ensure `key` is (being) loaded and mark it as just used. Experts from
     /// `protected_layers` are not evicted by the layer-distance policy.
-    pub fn prepare(&mut self, key: ExpertKey, protected_layers: &[usize]) {
+    pub fn prepare(&mut self, key: ExpertKey, protected_layers: &[usize]) -> Result<()> {
         if !self.known.contains_key(&key) || self.pinned.contains_key(&key) {
-            return;
+            return Ok(());
         }
         if let Some(&n) = self.index.get(&key) {
             self.stats.hits += 1;
             self.unlink(n);
             self.push_front(n);
-            return;
+            return Ok(());
         }
         self.stats.misses += 1;
         let mut reuse = None;
@@ -149,7 +151,7 @@ impl<R: Residency> ExpertCache<R> {
         let n = self.alloc_node(key);
         self.push_front(n);
         self.index.insert(key, n);
-        self.residency.load(key, reuse);
+        self.residency.load(key, reuse)
     }
 
     fn pick_victim(&self, incoming: ExpertKey, protected_layers: &[usize]) -> usize {
@@ -243,9 +245,10 @@ mod tests {
     }
 
     impl Residency for Mock {
-        fn load(&mut self, key: ExpertKey, reuse: Option<ExpertKey>) {
+        fn load(&mut self, key: ExpertKey, reuse: Option<ExpertKey>) -> Result<()> {
             self.loads.push((key, reuse));
             self.in_flight.push(key);
+            Ok(())
         }
         fn is_ready(&self, key: ExpertKey) -> bool {
             !self.in_flight.contains(&key)
@@ -265,10 +268,10 @@ mod tests {
     #[test]
     fn lru_evicts_least_recent_and_reuses_its_slot() {
         let mut c = cache(2, Policy::Lru);
-        c.prepare((1, 0), &[]);
-        c.prepare((1, 1), &[]);
-        c.prepare((1, 0), &[]); // hit, (1,1) is now LRU
-        c.prepare((2, 5), &[]);
+        c.prepare((1, 0), &[]).unwrap();
+        c.prepare((1, 1), &[]).unwrap();
+        c.prepare((1, 0), &[]).unwrap(); // hit, (1,1) is now LRU
+        c.prepare((2, 5), &[]).unwrap();
         assert_eq!(c.recency_order(), vec![(2, 5), (1, 0)]);
         assert_eq!(c.residency().loads.last(), Some(&((2, 5), Some((1, 1)))));
         assert_eq!(c.stats(), CacheStats { hits: 1, misses: 3, evictions: 1 });
@@ -277,7 +280,7 @@ mod tests {
     #[test]
     fn pinned_experts_are_free_and_ready() {
         let mut c = cache(1, Policy::Lru);
-        c.prepare((0, 3), &[]);
+        c.prepare((0, 3), &[]).unwrap();
         assert!(c.is_ready((0, 3)));
         assert!(c.residency().loads.is_empty());
         assert!(c.is_empty());
@@ -286,7 +289,7 @@ mod tests {
     #[test]
     fn readiness_follows_the_transfer() {
         let mut c = cache(4, Policy::Lru);
-        c.prepare((3, 1), &[]);
+        c.prepare((3, 1), &[]).unwrap();
         assert!(c.is_resident((3, 1)) && !c.is_ready((3, 1)));
         c.residency_mut().in_flight.clear();
         assert!(c.is_ready((3, 1)));
@@ -296,20 +299,20 @@ mod tests {
     #[test]
     fn layer_distance_evicts_the_furthest_upcoming_layer() {
         let mut c = cache(3, Policy::LayerDistance { num_layers: 4 });
-        c.prepare((1, 0), &[]);
-        c.prepare((2, 0), &[]);
-        c.prepare((3, 0), &[]);
-        c.prepare((1, 0), &[]); // most recent now; LRU would evict (2, 0)
+        c.prepare((1, 0), &[]).unwrap();
+        c.prepare((2, 0), &[]).unwrap();
+        c.prepare((3, 0), &[]).unwrap();
+        c.prepare((1, 0), &[]).unwrap(); // most recent now; LRU would evict (2, 0)
         // loading for layer 2: distances 1 -> 3, 2 -> 0, 3 -> 1
-        c.prepare((2, 7), &[]);
+        c.prepare((2, 7), &[]).unwrap();
         assert!(!c.is_resident((1, 0)));
         assert!(c.is_resident((2, 0)));
         // from layer 3 with layer 2 protected only (3, 0) is evictable
-        c.prepare((3, 4), &[2]);
+        c.prepare((3, 4), &[2]).unwrap();
         assert!(!c.is_resident((3, 0)));
         assert!(c.is_resident((2, 0)) && c.is_resident((2, 7)));
         // everything protected: fall back to the LRU tail
-        c.prepare((1, 1), &[2, 3]);
+        c.prepare((1, 1), &[2, 3]).unwrap();
         assert_eq!(c.residency().loads.last(), Some(&((1, 1), Some((2, 0)))));
     }
 }
