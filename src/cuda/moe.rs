@@ -2,7 +2,11 @@
 //!
 //! Experts are either all device-resident, or (when they do not fit) kept
 //! in pinned host memory and paged into a fixed pool of device slots by an
-//! [`ExpertCache`].
+//! [`ExpertCache`]. For an offloaded expert that is not in VRAM when a layer
+//! needs it and that received only a few tokens, computing it on the CPU
+//! (the expert executor reading the same pinned weights) beats a PCIe copy
+//! of the whole expert; those results are uploaded and merged like GPU
+//! results.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -10,12 +14,12 @@ use std::sync::{Arc, Mutex};
 use cudarc::driver::{CudaEvent, result};
 
 use super::{DeviceBuffer, PinnedBuffer, err, gpu, ops};
-use crate::cpu::expert::ExpertWeights;
+use crate::cpu::expert::{self, ExpertJob, ExpertWeights};
 use crate::dtype::DType;
 use crate::error::{Error, Result};
 use crate::moe_cache::{ExpertCache, ExpertKey, Policy, Residency};
 use crate::ops::MoeRouting;
-use crate::tensor::{Device, Tensor};
+use crate::tensor::{CpuBuffer, Device, Tensor};
 
 /// Alignment of each projection inside a packed expert.
 const PACK_ALIGN: usize = 256;
@@ -61,12 +65,14 @@ impl DeviceExpert {
 }
 
 /// An offloaded expert: gate|up|down packed in one pinned allocation (one
-/// async copy moves it), scales permanently on the device.
+/// async copy moves it), scales permanently on the device, and CPU views over
+/// the same pinned bytes for the cold path.
 struct HostExpert {
-    packed: PinnedBuffer,
+    packed: Arc<CpuBuffer>,
     parts: [(Vec<usize>, usize); 3],
     dtype: DType,
     dev_scales: [Option<Tensor>; 3],
+    cpu: ExpertWeights,
 }
 
 fn align_up(v: usize) -> usize {
@@ -88,14 +94,21 @@ impl HostExpert {
         for (o, t) in offsets.iter().zip(&ts) {
             pinned.as_mut_slice()[*o..*o + t.size_in_bytes()].copy_from_slice(t.bytes());
         }
+        let packed = Arc::new(CpuBuffer::Pinned(pinned));
+        let mut cpu = Vec::with_capacity(3);
         let mut dev_scales = [None, None, None];
         for (i, t) in ts.iter().enumerate() {
+            let mut view = Tensor::from_cpu_buffer(packed.clone(), t.shape(), t.dtype(), offsets[i])?;
             if let Some(s) = t.scale() {
+                view.set_scale(s.clone())?;
                 dev_scales[i] = Some(s.to_device(Device::Cuda)?);
             }
+            cpu.push(view);
         }
+        let mut it = cpu.into_iter();
+        let cpu = ExpertWeights::new(it.next().unwrap(), it.next().unwrap(), it.next().unwrap())?;
         Ok(HostExpert {
-            packed: pinned,
+            packed,
             parts: [
                 (ts[0].shape().to_vec(), offsets[0]),
                 (ts[1].shape().to_vec(), offsets[1]),
@@ -103,11 +116,12 @@ impl HostExpert {
             ],
             dtype: ts[0].dtype(),
             dev_scales,
+            cpu,
         })
     }
 
     fn bytes(&self) -> &[u8] {
-        self.packed.as_slice()
+        self.packed.bytes()
     }
 }
 
@@ -136,6 +150,10 @@ impl CudaResidency {
     fn add(&mut self, key: ExpertKey, e: HostExpert) {
         self.slot_bytes = self.slot_bytes.max(e.bytes().len());
         self.experts.insert(key, e);
+    }
+
+    fn cpu_weights(&self, key: ExpertKey) -> Option<&ExpertWeights> {
+        self.experts.get(&key).map(|e| &e.cpu)
     }
 
     /// Views of a resident expert; makes the compute stream wait for its
@@ -203,6 +221,9 @@ pub struct OffloadOptions {
     pub slots: usize,
     /// The first `resident_layers` MoE layers keep all experts on the GPU.
     pub resident_layers: usize,
+    /// Experts with at most this many tokens may run on the CPU when not
+    /// resident (0 disables the CPU path).
+    pub cpu_threshold: usize,
     pub policy: Policy,
 }
 
@@ -298,11 +319,42 @@ fn run_offloaded(
     let num_layers = rt.routers.len().max(1);
     let protect: Vec<usize> = (0..3).map(|i| (layer + i) % num_layers).collect();
     let mut cache = rt.cache.lock().unwrap();
-    let experts: Vec<usize> = routing.active_experts().collect();
+    let exec = expert::global();
 
-    // Batches of at most half the pool, so loading one batch never evicts an
-    // expert of the same batch; experts run as soon as their upload lands.
-    for batch in experts.chunks((rt.opts.slots / 2).max(1)) {
+    // cold experts with few tokens go to the CPU, the rest to the GPU
+    let mut gpu_experts = Vec::new();
+    let mut cpu_jobs: Vec<(usize, ExpertJob)> = Vec::new();
+    for e in routing.active_experts() {
+        let key = (layer, e);
+        let n = routing.tokens_for(e);
+        if !cache.is_resident(key)
+            && n <= rt.opts.cpu_threshold
+            && let Some(w) = cache.residency().cpu_weights(key)
+        {
+            let x = ops::to_host_f32(&rows(e, gathered)?)?;
+            cpu_jobs.push((e, exec.submit(w.clone(), x, n, true)?));
+        } else {
+            gpu_experts.push(e);
+        }
+    }
+
+    // GPU experts in batches of at most half the pool, so loading one batch
+    // never evicts an expert of the same batch.
+    let poll_cpu = |cpu_jobs: &mut Vec<(usize, ExpertJob)>| -> Result<()> {
+        let mut j = 0;
+        while j < cpu_jobs.len() {
+            if cpu_jobs[j].1.is_done() {
+                let (e, job) = cpu_jobs.swap_remove(j);
+                let y = job.take()?;
+                let dst = rows(e, expert_out)?;
+                ops::copy_into(&dst, &ops::from_host_f32(&y, dst.shape(), dst.dtype())?)?;
+            } else {
+                j += 1;
+            }
+        }
+        Ok(())
+    };
+    for batch in gpu_experts.chunks((rt.opts.slots / 2).max(1)) {
         for &e in batch {
             cache.prepare((layer, e), &protect)?;
         }
@@ -319,9 +371,16 @@ fn run_offloaded(
                     i += 1;
                 }
             }
+            poll_cpu(&mut cpu_jobs)?;
             if !pending.is_empty() {
                 std::thread::yield_now();
             }
+        }
+    }
+    while !cpu_jobs.is_empty() {
+        poll_cpu(&mut cpu_jobs)?;
+        if !cpu_jobs.is_empty() {
+            std::thread::yield_now();
         }
     }
     Ok(())

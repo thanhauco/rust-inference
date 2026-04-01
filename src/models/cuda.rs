@@ -87,6 +87,7 @@ impl Qwen3 {
                     Some(OffloadOptions {
                         slots: slots.max(2 * self.config.config.num_experts_per_tok),
                         resident_layers: 0,
+                        cpu_threshold: 8,
                         policy: Policy::LayerDistance { num_layers: self.layers.len() },
                     })
                 }

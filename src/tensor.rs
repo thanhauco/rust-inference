@@ -87,6 +87,10 @@ pub enum CpuBuffer {
         start: usize,
         len: usize,
     },
+    /// Page-locked memory (offloaded MoE experts): readable by the CPU
+    /// kernels and uploadable asynchronously.
+    #[cfg(feature = "cuda")]
+    Pinned(crate::cuda::PinnedBuffer),
 }
 
 impl CpuBuffer {
@@ -94,6 +98,8 @@ impl CpuBuffer {
         match self {
             CpuBuffer::Owned(b) => b.as_slice(),
             CpuBuffer::Mapped { map, start, len } => &map[*start..*start + *len],
+            #[cfg(feature = "cuda")]
+            CpuBuffer::Pinned(p) => p.as_slice(),
         }
     }
 
@@ -101,6 +107,8 @@ impl CpuBuffer {
         match self {
             CpuBuffer::Owned(b) => b.len,
             CpuBuffer::Mapped { len, .. } => *len,
+            #[cfg(feature = "cuda")]
+            CpuBuffer::Pinned(p) => p.len(),
         }
     }
 
@@ -372,6 +380,8 @@ impl Tensor {
             Storage::Cpu(arc) => match Arc::get_mut(arc) {
                 Some(CpuBuffer::Owned(b)) => Ok(&mut b.as_mut_slice()[range]),
                 Some(CpuBuffer::Mapped { .. }) => Err(Error::Unsupported("mutating a memory-mapped tensor".into())),
+                #[cfg(feature = "cuda")]
+                Some(CpuBuffer::Pinned(_)) => Err(Error::Unsupported("mutating a pinned weight buffer".into())),
                 None => Err(Error::Unsupported("mutating a shared tensor".into())),
             },
             #[cfg(feature = "cuda")]
@@ -502,6 +512,14 @@ impl Tensor {
 
     pub fn to_cpu(&self) -> Result<Tensor> {
         self.to_device(Device::Cpu)
+    }
+
+    /// A CPU tensor over an existing host buffer.
+    pub fn from_cpu_buffer(buf: Arc<CpuBuffer>, shape: &[usize], dtype: DType, offset: usize) -> Result<Self> {
+        if offset + numel(shape) * dtype.size() > buf.len() {
+            return Err(Error::Shape(format!("{shape:?} {dtype} @ {offset} exceeds host buffer of {}", buf.len())));
+        }
+        Ok(Tensor { shape: shape.to_vec(), dtype, storage: Storage::Cpu(buf), offset, scale: None })
     }
 
     /// Device address of element 0. Panics for CPU tensors.

@@ -177,10 +177,10 @@ fn offloaded_moe_matches_resident() {
     };
     let ids = [5u32, 17, 300, 42, 8, 9, 100];
     let resident = prefill_logits(&load(None), &ids);
-    for (resident_layers, policy) in [(0, Policy::Lru), (1, Policy::LayerDistance { num_layers: 2 })] {
-        let opts = OffloadOptions { slots: 3, resident_layers, policy };
+    for (cpu_threshold, policy) in [(0, Policy::Lru), (8, Policy::Lru), (2, Policy::LayerDistance { num_layers: 2 })] {
+        let opts = OffloadOptions { slots: 3, resident_layers: 0, cpu_threshold, policy };
         let got = prefill_logits(&load(Some(opts)), &ids);
         let c = cosine(&got, &resident);
-        assert!(c > 0.999, "{policy:?}: cosine {c}");
+        assert!(c > 0.999, "cpu_threshold {cpu_threshold}: cosine {c}");
     }
 }

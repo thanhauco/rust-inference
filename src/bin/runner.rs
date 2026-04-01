@@ -108,6 +108,11 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     resident_moe_layers: usize,
 
+    /// GPU offload: experts with at most this many tokens that are not in
+    /// VRAM run on the CPU (0 = never)
+    #[arg(long, default_value_t = 8)]
+    cpu_expert_threshold: usize,
+
     /// GPU offload: evict by recency instead of by upcoming layer
     #[arg(long)]
     lru: bool,
@@ -132,6 +137,7 @@ fn load_model(args: &Args) -> Result<Box<dyn LanguageModel>, Box<dyn std::error:
             let offload = args.expert_slots.map(|slots| OffloadOptions {
                 slots,
                 resident_layers: args.resident_moe_layers,
+                cpu_threshold: args.cpu_expert_threshold,
                 policy: if args.lru { Policy::Lru } else { Policy::LayerDistance { num_layers: layers } },
             });
             let model = models::Qwen3::load(config, &args.model_dir)?;
