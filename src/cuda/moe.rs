@@ -6,7 +6,9 @@
 //! needs it and that received only a few tokens, computing it on the CPU
 //! (the expert executor reading the same pinned weights) beats a PCIe copy
 //! of the whole expert; those results are uploaded and merged like GPU
-//! results.
+//! results. With prefetching on, the router of layer `l + 2` is run on the
+//! current hidden state to start uploading the experts it is likely to pick
+//! (the C++ engine's speculative prefetch).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -225,12 +227,13 @@ pub struct OffloadOptions {
     /// resident (0 disables the CPU path).
     pub cpu_threshold: usize,
     pub policy: Policy,
+    pub prefetch: bool,
 }
 
 /// State shared by all offloaded MoE layers.
 pub struct OffloadRuntime {
     cache: Mutex<ExpertCache<CudaResidency>>,
-    /// device routers by layer index
+    /// device routers by layer index (for speculative prefetch)
     routers: Vec<Option<Tensor>>,
     opts: OffloadOptions,
 }
@@ -309,8 +312,8 @@ pub fn forward(
 fn run_offloaded(
     layer: usize,
     rt: &OffloadRuntime,
-    _h: &Tensor,
-    _tokens: usize,
+    h: &Tensor,
+    tokens: usize,
     routing: &MoeRouting,
     gathered: &Tensor,
     expert_out: &Tensor,
@@ -335,6 +338,22 @@ fn run_offloaded(
             cpu_jobs.push((e, exec.submit(w.clone(), x, n, true)?));
         } else {
             gpu_experts.push(e);
+        }
+    }
+
+    // Speculative prefetch for the layer two steps ahead. Only with a pool
+    // big enough that it cannot push out experts this layer still needs.
+    let k = routing.top_k;
+    if rt.opts.prefetch
+        && tokens < 3
+        && rt.opts.slots >= 4 * k * tokens.max(1)
+        && layer + 2 < num_layers
+        && let Some(r2) = &rt.routers[layer + 2]
+    {
+        let logits = ops::linear(h, r2)?;
+        let (ids, _) = ops::topk_softmax(&logits, k.min(r2.dim(0)), true)?;
+        for e in ids {
+            cache.prepare((layer + 2, e as usize), &protect)?;
         }
     }
 

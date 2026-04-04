@@ -116,6 +116,10 @@ struct Args {
     /// GPU offload: evict by recency instead of by upcoming layer
     #[arg(long)]
     lru: bool,
+
+    /// GPU offload: disable speculative expert prefetch
+    #[arg(long)]
+    no_prefetch: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -139,6 +143,7 @@ fn load_model(args: &Args) -> Result<Box<dyn LanguageModel>, Box<dyn std::error:
                 resident_layers: args.resident_moe_layers,
                 cpu_threshold: args.cpu_expert_threshold,
                 policy: if args.lru { Policy::Lru } else { Policy::LayerDistance { num_layers: layers } },
+                prefetch: !args.no_prefetch,
             });
             let model = models::Qwen3::load(config, &args.model_dir)?;
             Ok(Box::new(model.to_cuda(&CudaOptions { offload })?))

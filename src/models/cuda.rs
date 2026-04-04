@@ -89,6 +89,7 @@ impl Qwen3 {
                         resident_layers: 0,
                         cpu_threshold: 8,
                         policy: Policy::LayerDistance { num_layers: self.layers.len() },
+                        prefetch: true,
                     })
                 }
             }
