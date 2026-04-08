@@ -10,6 +10,7 @@
 
 mod buffer;
 pub mod moe;
+pub mod nvml;
 pub mod ops;
 
 use std::collections::HashMap;

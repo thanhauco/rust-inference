@@ -240,6 +240,10 @@ pub fn available_counters() -> Vec<Box<dyn EnergyCounter>> {
     if let Some(r) = Rapl::open() {
         v.push(Box::new(r));
     }
+    #[cfg(feature = "cuda")]
+    if let Some(n) = crate::cuda::nvml::NvmlEnergy::open() {
+        v.push(Box::new(n));
+    }
     v
 }
 
