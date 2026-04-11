@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets
+      - run: cargo test --release
+      # cap the SIMD level to exercise the fallback kernels too
+      - run: cargo test --release --lib
+        env:
+          GARLIC_CPU_ISA: avx2
+      - run: cargo test --release --lib
+        env:
+          GARLIC_CPU_ISA: scalar
+
+  cuda:
+    # No GPU on hosted runners: build the backend, compile the kernels with
+    # NVRTC, and let the GPU tests skip themselves.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --features cuda
+      - run: cargo test --release --features cuda
+      - name: Compile kernels with NVRTC
+        run: |
+          python3 -m venv /tmp/nvrtc
+          /tmp/nvrtc/bin/pip install --quiet nvidia-cuda-nvrtc-cu12
+          NVRTC=$(/tmp/nvrtc/bin/python -c "import nvidia.cuda_nvrtc, os; print(os.path.join(list(nvidia.cuda_nvrtc.__path__)[0], 'lib'))")
+          LD_LIBRARY_PATH=$NVRTC cargo test --release --features cuda --lib kernels_compile -- --ignored
