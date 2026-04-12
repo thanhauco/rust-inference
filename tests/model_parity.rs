@@ -17,7 +17,7 @@ fn fixture(name: &str) -> String {
 }
 
 fn read_f32(path: &str) -> Vec<f32> {
-    std::fs::read(path).unwrap().chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect()
+    std::fs::read(path).unwrap().as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect()
 }
 
 fn assert_close(got: &[f32], want: &[f32], what: &str) {

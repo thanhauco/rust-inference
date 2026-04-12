@@ -121,9 +121,9 @@ impl SafeTensorReader {
         };
         let raw = &self.map[info.start..info.end];
         let vals: Vec<f32> = match info.dtype {
-            DType::F32 => raw.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect(),
-            DType::BF16 => raw.chunks_exact(2).map(|c| dtype::bf16_to_f32(u16::from_le_bytes([c[0], c[1]]))).collect(),
-            DType::F16 => raw.chunks_exact(2).map(|c| dtype::f16_to_f32(u16::from_le_bytes([c[0], c[1]]))).collect(),
+            DType::F32 => raw.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect(),
+            DType::BF16 => raw.as_chunks::<2>().0.iter().map(|c| dtype::bf16_to_f32(u16::from_le_bytes(*c))).collect(),
+            DType::F16 => raw.as_chunks::<2>().0.iter().map(|c| dtype::f16_to_f32(u16::from_le_bytes(*c))).collect(),
             other => {
                 return Err(Error::Unsupported(format!("scale dtype {other} for {name}")));
             }
