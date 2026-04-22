@@ -54,6 +54,9 @@ Useful runner flags (`runner --help` for all of them):
 | `--lru`, `--resident-moe-layers N`, `--no-prefetch` | GPU offload policy knobs |
 | `-t N` | CPU threads (`GARLIC_CPU_THREADS` sizes the expert executor, `GARLIC_CPU_ISA=avx2/scalar` caps SIMD) |
 
+As a library, `examples/generate.rs` shows the minimal load / tokenize / forward
+/ argmax loop (`cargo run --release --example generate -- <MODEL_DIR> "prompt"`).
+
 Converting a BF16 checkpoint to FP8 (same layout as Qwen's FP8 releases):
 
 ```bash
