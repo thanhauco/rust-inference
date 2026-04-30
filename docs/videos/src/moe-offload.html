@@ -1,0 +1,346 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>MoE expert offloading</title>
+<style>html,body{margin:0;background:#0d1117}svg{display:block}</style>
+<svg id="s" width="1280" height="720" viewBox="0 0 1280 720"></svg>
+<script src="lib.js"></script>
+<script>
+const DUR = 58;
+const TOKC = [C.teal, C.amber, C.violet, C.rose];
+
+// ---- scene A: routing (4 - 13.6 s) ----
+const ROUTE = [
+  [[2, 0.6], [9, 0.4]],
+  [[9, 0.6], [14, 0.4]],
+  [[2, 0.55], [5, 0.45]],
+  [[5, 0.5], [14, 0.5]],
+];
+const ACTIVE = [2, 5, 9, 14];
+const EXC = (e) => ({ x: 560 + (e % 4) * 86, y: 160 + Math.floor(e / 4) * 66 });
+const TY = (i) => 180 + i * 70;
+
+function routeScene(t) {
+  const op = win(t, 4, 13.6, 0.5, 0.6);
+  if (op <= 0) return;
+  group(0, 0, 1, op, () => {
+    text(90, 136, 'TOKENS', { size: 14, fill: C.dim, ls: 2.5 });
+    text(560, 136, 'EXPERTS OF ONE LAYER', { size: 14, fill: C.dim, ls: 2.5 });
+    text(1010, 136, 'OUTPUT', { size: 14, fill: C.dim, ls: 2.5 });
+    const kRouter = ramp(t, 4.6, 5.4, E.out);
+    box(262, 235, 140, 100, 'router', { r: 14, size: 22, stroke: C.blue, op: kRouter, fill: mix(C.panel2, C.blue, 0.18) });
+    text(332, 360, 'linear + top-k softmax', { size: 13, anchor: 'middle', fill: C.dim, op: kRouter });
+
+    const startOf = (i) => 5.8 + i * 0.75;
+    const used = new Set();
+    ROUTE.forEach((r, i) => { if (t > startOf(i) + 0.4) r.forEach(([e]) => used.add(e)); });
+    for (let e = 0; e < 16; e++) {
+      const { x, y } = EXC(e);
+      const on = used.has(e);
+      rect(x, y, 78, 58, { r: 10, fill: C.panel2, stroke: on ? C.text : C.line, sw: on ? 2 : 1.4, op: ramp(t, 4.4 + (e % 4) * 0.08, 5.2 + (e % 4) * 0.08) });
+      text(x + 10, y + 20, `E${e}`, { size: 14, fill: on ? C.text : C.dim, weight: 600, op: ramp(t, 4.6, 5.2) });
+    }
+    TOKC.forEach((c, i) => {
+      const k = ramp(t, 4.4 + i * 0.1, 5.2 + i * 0.1, E.back);
+      box(90, TY(i) - 22 + (1 - k) * 12, 80, 44, `t${i}`, { r: 12, size: 21, stroke: c, op: clamp(k * 2), mono: true });
+      const s = startOf(i);
+      const a = ramp(t, s, s + 0.35);
+      if (a > 0) line(172, TY(i), lerp(172, 258, a), lerp(TY(i), 285, a), { stroke: c, sw: 2, op: 0.9 });
+      ROUTE[i].forEach(([e, w], j) => {
+        const b = ramp(t, s + 0.3, s + 0.8);
+        if (b <= 0) return;
+        const { x, y } = EXC(e);
+        const tx = x, ty = y + 18 + j * 22;
+        line(404, 285, lerp(404, tx, b), lerp(285, ty, b), { stroke: c, sw: 2, op: 0.75 });
+        if (b >= 1) {
+          circle(x + 56 + (i % 2) * 11, y + 46, 5, { fill: c });
+          text(x + 20 + j * 0, y + 44, w.toFixed(2), { size: 11, fill: c, op: 0.95 });
+        }
+      });
+    });
+
+    // gather
+    const g = ramp(t, 9.4, 10.2);
+    if (g > 0) {
+      text(560, 462, 'GATHER: TOKENS GROUPED PER EXPERT', { size: 14, fill: C.dim, ls: 2.5, op: g });
+      ACTIVE.forEach((e, n) => {
+        const toks = ROUTE.map((r, i) => (r.some(([x]) => x === e) ? i : -1)).filter((i) => i >= 0);
+        const bx = 560 + n * 112;
+        rect(bx, 476, 100, 56, { r: 10, fill: C.panel2, stroke: C.line, op: g });
+        text(bx + 10, 498, `E${e}`, { size: 15, weight: 700, op: g });
+        toks.forEach((i, j) => rect(bx + 10 + j * 30, 506, 24, 16, { r: 5, fill: TOKC[i], op: g * 0.9 }));
+      });
+    }
+    // scatter
+    const sc = ramp(t, 11.4, 12.6);
+    ACTIVE.forEach((e) => {
+      ROUTE.forEach((r, i) => {
+        if (!r.some(([x]) => x === e) || sc <= 0) return;
+        const { x, y } = EXC(e);
+        line(x + 78, y + 29, lerp(x + 78, 1006, sc), lerp(y + 29, TY(i), sc), { stroke: TOKC[i], sw: 1.5, op: 0.45 });
+      });
+    });
+    TOKC.forEach((c, i) => {
+      const k = ramp(t, 12.4 + i * 0.1, 13.0 + i * 0.1);
+      box(1010, TY(i) - 22, 120, 44, `out t${i}`, { r: 12, size: 19, stroke: c, fill: mix(C.panel2, c, 0.25), op: k, mono: true });
+    });
+    text(1070, 470, 'weighted sum per token', { size: 15, anchor: 'middle', fill: C.dim, op: sc });
+  });
+}
+
+// ---- scene B: host memory and GPU slots (13.6 - 22.4 s) ----
+const SLOT_LABELS = ['L0·E3', 'L0·E7', 'L1·E1', 'L1·E9', 'L2·E4', 'L2·E6'];
+function memoryScene(t) {
+  const op = win(t, 13.6, 22.4, 0.5, 0.6);
+  if (op <= 0) return;
+  group(0, 0, 1, op, () => {
+    const hx = (k) => 90 + (k % 14) * 32;
+    const hy = (k) => 172 + Math.floor(k / 14) * 34;
+    box(70, 130, 480, 300, '', { r: 16 });
+    text(90, 156, 'PINNED HOST MEMORY', { size: 14, fill: C.dim, ls: 2.5 });
+    for (let k = 0; k < 98; k++) {
+      const taken = k < 6 ? clamp((t - (17.0 + k * 0.75)) / 0.3) : 0;
+      rect(hx(k), hy(k), 24, 26, { r: 5, fill: C.blue, op: (0.25 + 0.4 * rnd(k)) * (1 - 0.7 * taken) * ramp(t, 14.0 + (k % 14) * 0.03, 14.8 + (k % 14) * 0.03) });
+    }
+    text(90, 418, 'every expert of every layer · ≈ 30 GB in FP8', { size: 15, fill: C.dim, op: ramp(t, 15, 15.8) });
+
+    box(730, 130, 480, 300, '', { r: 16 });
+    text(750, 156, 'GPU MEMORY', { size: 14, fill: C.dim, ls: 2.5 });
+    box(750, 176, 440, 46, 'attention · dense weights · KV cache', { r: 10, size: 17, fill: mix(C.panel2, C.violet, 0.18), stroke: C.violet, op: ramp(t, 15.4, 16.2) });
+    text(750, 276, 'EXPERT SLOTS', { size: 14, fill: C.dim, ls: 2.5, op: ramp(t, 15.8, 16.5) });
+    for (let k = 0; k < 6; k++) {
+      const x = 750 + k * 76, y = 292;
+      const arrive = 17.0 + k * 0.75 + 0.9;
+      const have = t >= arrive;
+      rect(x, y, 64, 84, { r: 10, fill: have ? mix(C.panel2, C.teal, 0.25) : '#10151f', stroke: have ? C.teal : C.line, sw: have ? 2 : 1.4, op: ramp(t, 15.8, 16.5) });
+      if (have) text(x + 32, y + 50, SLOT_LABELS[k], { size: 13, anchor: 'middle', mono: true });
+    }
+    text(750, 412, 'a fixed pool: each slot holds one expert', { size: 15, fill: C.dim, op: ramp(t, 16, 16.8) });
+
+    // PCIe
+    const p = ramp(t, 16.2, 17.0);
+    line(552, 342, 728, 342, { stroke: C.dim, sw: 2, dash: '6 6', op: p });
+    text(640, 326, 'PCIe', { size: 16, anchor: 'middle', fill: C.dim, weight: 600, op: p });
+    for (let k = 0; k < 6; k++) {
+      const s = 17.0 + k * 0.75;
+      const u = clamp((t - s) / 0.9);
+      if (u <= 0 || u >= 1) continue;
+      const sx = hx(k) + 12, sy = hy(k) + 13;
+      const tx = 750 + k * 76 + 32, ty = 334;
+      let x, y;
+      if (u < 0.5) {
+        const a = E.inout(u / 0.5);
+        x = lerp(sx, 552, a); y = lerp(sy, 342, a);
+      } else {
+        const a = E.inout((u - 0.5) / 0.5);
+        x = lerp(552, tx, a); y = lerp(342, ty, a);
+      }
+      rect(x - 12, y - 13, 24, 26, { r: 5, fill: C.teal, op: 0.95 });
+    }
+    text(W / 2, 500, 'Qwen3-30B-A3B: 48 layers × 128 experts, 8 experts used per token', {
+      size: 20, anchor: 'middle', weight: 600, op: ramp(t, 18.6, 19.4),
+    });
+  });
+}
+
+// ---- scene C: eviction policies (22.4 - 33.6 s) ----
+const SLOTS = [
+  { label: 'L3 · E7', layer: 3, rank: 3, dist: 0 },
+  { label: 'L2 · E19', layer: 2, rank: 1, dist: 47 },
+  { label: 'L4 · E88', layer: 4, rank: 4, dist: 1 },
+  { label: 'L1 · E5', layer: 1, rank: 2, dist: 46 },
+];
+function policyScene(t) {
+  const op = win(t, 22.4, 33.6, 0.5, 0.6);
+  if (op <= 0) return;
+  group(0, 0, 1, op, () => {
+    const lru = t < 27.9;
+    const t0 = lru ? 23.0 : 28.2;
+    const victim = lru ? 2 : 1;
+    const evictAt = t0 + 1.2, swapAt = t0 + 2.4;
+    text(W / 2, 150, 'layer 3 needs   E7 (resident)   ·   E40 (not resident)', { size: 22, anchor: 'middle', weight: 600 });
+    const title = lru ? 'POLICY: LRU' : 'POLICY: LAYER DISTANCE';
+    text(W / 2, 200, title, { size: 17, anchor: 'middle', ls: 3, weight: 700, fill: lru ? C.rose : C.green });
+    SLOTS.forEach((s, i) => {
+      const x = 140 + i * 224, y = 240;
+      const evicting = i === victim && t >= evictAt;
+      const swapped = i === victim && t >= swapAt;
+      const col = swapped ? C.teal : evicting ? C.rose : C.line;
+      rect(x, y, 200, 96, { r: 14, fill: swapped ? mix(C.panel2, C.teal, 0.25) : evicting ? mix(C.panel2, C.rose, 0.2) : C.panel2, stroke: col, sw: evicting ? 2.6 : 1.5 });
+      text(x + 100, y + 42, swapped ? 'L3 · E40' : s.label, { size: 24, anchor: 'middle', mono: true, weight: 700 });
+      const LRU_SUB = { 1: 'used just now', 2: 'used a moment ago', 3: 'prefetched, not used yet', 4: 'last used in the previous token' };
+      const sub = swapped ? 'uploaded from host' : lru ? LRU_SUB[s.rank] : s.dist === 0 ? 'this layer' : s.dist === 1 ? 'next layer' : `runs again in ${s.dist} layers`;
+      text(x + 100, y + 70, sub, { size: 14, anchor: 'middle', fill: evicting && !swapped ? C.rose : C.dim });
+      if (evicting && !swapped) text(x + 100, y - 10, 'evict', { size: 16, anchor: 'middle', fill: C.rose, weight: 700 });
+    });
+    // upload arrow
+    if (t >= evictAt && t < swapAt + 0.3) {
+      const vx = 140 + victim * 224 + 100;
+      box(W / 2 - 150, 380, 300, 40, 'pinned host memory', { r: 10, size: 16, stroke: C.blue });
+      arrow(W / 2, 380, vx, 340, { stroke: C.teal, sw: 2.2, op: ramp(t, evictAt, evictAt + 0.5) });
+    }
+    // verdict
+    const v = ramp(t, t0 + 3.4, t0 + 4.1);
+    if (lru) text(W / 2, 470, '…but layer 4 runs next and needs that expert back', { size: 22, anchor: 'middle', fill: C.rose, weight: 600, op: v });
+    else text(W / 2, 470, 'layer 2 will not run again for 47 layers: the safest one to drop', { size: 22, anchor: 'middle', fill: C.green, weight: 600, op: v });
+    // layer strip, layer-distance phase
+    if (!lru) {
+      const k = ramp(t, 28.0, 28.8);
+      text(140, 506, 'NEXT USE  →', { size: 13, fill: C.dim, ls: 2, op: k });
+      line(140, 548, 1090, 548, { stroke: C.line, sw: 3, op: k });
+      SLOTS.forEach((s) => {
+        const x = 140 + (s.dist / 47) * 950;
+        const hot = s.layer === 2;
+        circle(x, 548, hot ? 8 : 6, { fill: hot ? C.green : C.dim, op: k });
+        text(x, s.layer === 4 || s.layer === 2 ? 576 : 530, `L${s.layer}`, { size: 14, anchor: 'middle', fill: hot ? C.green : C.dim, weight: 700, op: k });
+      });
+    }
+  });
+}
+
+// ---- scene D: streams and the CPU cold path (33.6 - 45.6 s) ----
+const LANE_X = 300, LANE_W = 880, TS = 34.2, TSPAN = 9.6;
+const LY = [215, 305, 395];
+function lanesScene(t) {
+  const op = win(t, 33.6, 45.6, 0.5, 0.6);
+  if (op <= 0) return;
+  group(0, 0, 1, op, () => {
+    const u = (t - TS) / TSPAN * 10; // 0..10
+    const ux = (v) => LANE_X + (v / 10) * LANE_W;
+    text(LANE_X, 148, 'ONE MOE LAYER: E7 IS RESIDENT, E40 NEEDS AN UPLOAD, E55 GOT 2 TOKENS', { size: 14, fill: C.dim, ls: 2 });
+    ['transfer stream', 'compute stream', 'CPU executor'].forEach((n, i) => {
+      rect(LANE_X, LY[i], LANE_W, 56, { r: 10, fill: '#10151f', stroke: C.line });
+      text(LANE_X - 16, LY[i] + 34, n, { size: 17, anchor: 'end', fill: C.dim, weight: 600 });
+    });
+    const bar = (lane, a, b, label, col) => {
+      const w = clamp((u - a) / (b - a));
+      if (w <= 0) return;
+      rect(ux(a), LY[lane] + 8, (ux(b) - ux(a)) * w, 40, { r: 8, fill: mix(C.panel, col, 0.55), stroke: col, sw: 1.6 });
+      if (w > 0.97) text((ux(a) + ux(b)) / 2, LY[lane] + 34, label, { size: 15, anchor: 'middle', weight: 600 });
+    };
+    bar(1, 0.3, 1.9, 'E7', C.teal);
+    bar(0, 0.4, 3.9, 'upload E40 (packed gate|up|down)', C.amber);
+    bar(2, 0.3, 5.2, 'E55 on the CPU (2 tokens), from pinned memory', C.rose);
+    bar(1, 4.0, 5.8, 'E40', C.teal);
+    bar(0, 5.3, 6.1, 'rows ↑', C.amber);
+    bar(1, 6.2, 7.2, 'scatter', C.green);
+
+    const ev = (v, lane, label, dy) => {
+      if (u < v) return;
+      const x = ux(v), y = LY[lane] + 28;
+      out.push(`<polygon points="${x},${y - 9} ${x + 9},${y} ${x},${y + 9} ${x - 9},${y}" fill="${C.text}"/>`);
+      text(x, LY[lane] + dy, label, { size: 13, anchor: 'middle', fill: C.text, mono: true });
+    };
+    // event handshakes
+    if (u > 0.05) {
+      ev(0.15, 1, 'slot free', 78);
+      arrow(ux(0.15), LY[1], ux(0.4), LY[0] + 56, { stroke: C.text, dash: '4 4', op: 0.6, head: 7 });
+    }
+    if (u > 3.9) {
+      ev(3.95, 0, 'ready(E40)', -6);
+      arrow(ux(3.95), LY[0] + 56, ux(4.0), LY[1], { stroke: C.text, dash: '4 4', op: 0.6, head: 7 });
+    }
+    if (u > 5.25) arrow(ux(5.2), LY[2], ux(5.3), LY[0] + 56, { stroke: C.rose, dash: '4 4', op: 0.7, head: 7 });
+    if (u > 6.15) arrow(ux(6.1), LY[0] + 56, ux(6.2), LY[1], { stroke: C.amber, dash: '4 4', op: 0.7, head: 7 });
+    // playhead
+    const px = clamp(u, 0, 10) * LANE_W / 10 + LANE_X;
+    line(px, 168, px, 470, { stroke: C.text, sw: 1.5, op: 0.35 });
+    // notes
+    const n1 = ramp(t, 36.0, 36.8);
+    text(LANE_X, 520, 'CPU path: ≤ cpu_threshold tokens (default 8), so skip the upload', { size: 17, fill: C.rose, op: n1, weight: 600 });
+    const n2 = ramp(t, 40.4, 41.2);
+    text(LANE_X, 550, 'The GPU never waits on a half-written slot: compute waits on ready(E40),', { size: 17, fill: C.text, op: n2 });
+    text(LANE_X, 578, 'and the upload waits for slot free before overwriting an evicted expert.', { size: 17, fill: C.text, op: n2 });
+  });
+}
+
+// ---- scene E: prefetch (45.6 - 53.8 s) ----
+function prefetchScene(t) {
+  const op = win(t, 45.6, 53.9, 0.5, 0.6);
+  if (op <= 0) return;
+  group(0, 0, 1, op, () => {
+    const L = [3, 4, 5, 6, 7];
+    const bx = (i) => 130 + i * 200;
+    const active = t < 48.4 ? 0 : t < 50.8 ? 1 : 2;
+    text(130, 108, 'DECODE: LAYERS RUN ONE AFTER ANOTHER', { size: 14, fill: C.dim, ls: 2.5 });
+    L.forEach((l, i) => {
+      const on = i === active;
+      if (on) rect(bx(i) - 4, 196, 168, 76, { r: 16, fill: C.teal, op: 0.18, filter: 'glow' });
+      box(bx(i), 200, 160, 68, `layer ${l}`, { r: 12, size: 22, stroke: on ? C.teal : C.line, fill: on ? mix(C.panel2, C.teal, 0.28) : C.panel2 });
+      if (i < 4) arrow(bx(i) + 162, 234, bx(i + 1) - 2, 234, { stroke: C.line, head: 7 });
+    });
+    // GPU slot row and host row
+    text(130, 392, 'GPU SLOTS', { size: 14, fill: C.dim, ls: 2.5 });
+    const slotTags = [
+      { who: 2, at: 48.4 },
+      { who: 3, at: 50.8 },
+    ];
+    for (let k = 0; k < 8; k++) {
+      const x = 130 + k * 124, y = 410;
+      let col = C.line, fill = '#10151f', label = '', lc = C.dim;
+      // experts for layer 5 (slots 0-1) arrive during layer 3, experts for layer 6 (slots 2-3) during layer 4
+      const group = k < 2 ? 0 : k < 4 ? 1 : -1;
+      if (group === 0 && t > 47.6) { col = C.amber; fill = mix(C.panel2, C.amber, 0.2); label = `L5·E${[12, 77][k]}`; }
+      if (group === 1 && t > 49.8) { col = C.amber; fill = mix(C.panel2, C.amber, 0.2); label = `L6·E${[3, 90][k - 2]}`; }
+      if (group === 0 && t > 50.9) { col = C.green; fill = mix(C.panel2, C.green, 0.25); lc = C.text; }
+      rect(x, y, 108, 56, { r: 10, fill, stroke: col, sw: col === C.line ? 1.4 : 2 });
+      if (label) text(x + 54, y + 34, label, { size: 15, anchor: 'middle', mono: true, fill: lc === C.dim ? C.text : lc });
+    }
+    // host row
+    box(130, 520, 990, 40, 'pinned host memory', { r: 10, size: 16, stroke: C.blue });
+    // layer l+2 router
+    const fire = (l, a) => {
+      const k = ramp(t, a, a + 0.8);
+      if (k <= 0) return;
+      const from = bx(l - 3) + 80, to = bx(l - 1) + 80;
+      path(`M ${from} 200 C ${from} 150, ${to} 150, ${to} 196`, { stroke: C.amber, sw: 2.2, dash: '6 5', op: 0.9 * k });
+      text((from + to) / 2, 134, `router of layer ${l + 2}`, { size: 15, anchor: 'middle', fill: C.amber, weight: 600, op: k });
+      // uploads
+      for (let j = 0; j < 2; j++) {
+        const u = clamp((t - (a + 0.7 + j * 0.25)) / 0.9);
+        if (u <= 0 || u >= 1) continue;
+        const sx = 300 + j * 80 + (l - 3) * 200, sy = 520;
+        const tx = 130 + ((l - 3) * 2 + j) * 124 + 54, ty = 438;
+        rect(lerp(sx, tx, E.inout(u)) - 12, lerp(sy, ty, E.inout(u)) - 13, 24, 26, { r: 5, fill: C.amber, op: 0.9 });
+      }
+    };
+    fire(3, 46.5);
+    fire(4, 48.9);
+    const hit = ramp(t, 50.9, 51.6);
+    path(`M ${bx(2) + 80} 272 C ${bx(2) + 80} 340, 240 330, 240 402`, { stroke: C.green, sw: 2.4, op: hit });
+    arrow(240, 396, 240, 406, { stroke: C.green, op: hit, head: 10 });
+    text(430, 340, 'layer 5 starts: its experts are already resident', { size: 17, anchor: 'middle', fill: C.green, weight: 700, op: hit });
+  });
+}
+
+start({
+  duration: DUR,
+  title: 'MoE expert offloading',
+  draw: (t) => {
+    titleCard(t, 0, 4.2, 'MoE expert offloading', 'Running a 30B-parameter model when the GPU holds only part of it', [
+      'router', 'expert cache', 'CPU cold path', 'prefetch',
+    ]);
+    routeScene(t);
+    memoryScene(t);
+    policyScene(t);
+    lanesScene(t);
+    prefetchScene(t);
+    titleCard(t, 54.2, 58, 'A big model on a small GPU', 'Cache the experts you need, compute the cold ones on the CPU, fetch ahead.', [
+      'src/moe_cache.rs', 'src/cuda/moe.rs', 'src/cpu/expert.rs',
+    ]);
+    const note = ramp(t, 55.4, 56.2);
+    if (note > 0 && t < 58) text(W / 2, 480, 'The CUDA path is built and its kernels are compiled in CI; the GPU parity tests still need a GPU run.', { size: 16, anchor: 'middle', fill: C.dim, op: note * win(t, 55.4, 58, 0.5, 0.6) });
+    caption(t, [
+      { a: 4.6, b: 9.2, text: 'A router picks the top-k experts for every token\n(8 of 128 in Qwen3-30B-A3B, 2 of 16 here).' },
+      { a: 9.4, b: 11.2, text: 'Tokens are gathered so each expert sees its tokens as one batch.' },
+      { a: 11.5, b: 13.4, text: 'Results are scattered back and summed with the router weights.' },
+      { a: 14.2, b: 17.0, text: 'All experts live in pinned host memory.\nThe GPU keeps a fixed pool of expert slots.' },
+      { a: 17.4, b: 22.2, text: 'Experts are uploaded into slots on demand, over the transfer stream.' },
+      { a: 23.2, b: 27.8, text: 'LRU would drop the expert that layer 4 needs next:\nlayers run in a cycle, so recency misleads.' },
+      { a: 28.4, b: 33.4, text: 'Layer distance drops the expert whose layer comes up last\nin the cyclic order.' },
+      { a: 34.0, b: 40.2, text: 'An expert that got only a few tokens skips the upload:\nthe CPU runs it from pinned memory while the GPU works.' },
+      { a: 40.8, b: 45.4, text: 'CUDA events keep the two streams in order.' },
+      { a: 46.2, b: 53.6, text: "During decode, layer l runs layer l+2's router on its own hidden state\nand starts uploading the experts it picks." },
+    ]);
+  },
+});
+</script>
