@@ -112,6 +112,12 @@ python scripts/tokenizer_fixture.py tests/fixtures/tokenizer   # needs `tokenize
 python scripts/reference_qwen3.py tests/fixtures               # needs `numpy`
 ```
 
+## Documentation
+
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) explains the paged KV cache, block-scaled
+FP8, expert offloading, the forward pass, the CPU and CUDA kernels, and how to
+use the crate as a library.
+
 ## Layout
 
 ```

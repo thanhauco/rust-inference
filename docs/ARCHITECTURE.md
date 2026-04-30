@@ -22,6 +22,62 @@ FP8 weights carry a 2-D F32 block scale (`*_scale_inv`, normally one per
 On the CPU, activations are F32. On the GPU they are BF16 (F16 for F16
 checkpoints) and the KV cache uses the same type.
 
+## Concepts
+
+**Paged KV cache.** Keys and values are stored in fixed pools of 32-token
+pages (`[max_pages, kv_heads, 32, head_dim]` per layer) instead of one
+contiguous buffer per sequence. A per-sequence page table maps token
+positions to pages, and pages come from a free list as the sequence grows.
+`--max-pages` sizes the pool and `--pages-per-seq` caps a sequence, so the
+default of 128 pages allows 4096 tokens of context.
+
+**Block-scaled FP8.** An FP8 (E4M3) weight is one byte per value plus a
+scale for each 128x128 tile (`<name>_scale_inv`, an F32 matrix). A value is
+`decode(byte) * scale`. Weights stay in FP8 in memory and are decoded inside
+the matmul kernels, which halves the bytes streamed per token compared with
+BF16. That is what bounds decode speed.
+
+**Expert offloading.** A MoE layer has many experts (128 in Qwen3-30B-A3B)
+but each token uses only a few. When all experts do not fit in GPU memory,
+they live in pinned host memory and only a fixed number of device slots hold
+copies. Experts that a batch needs are uploaded on demand, experts that got
+only a few tokens run on the CPU instead of being uploaded, and the next
+layers' likely experts are uploaded early. See "GPU expert offloading" below.
+
+**Device dispatch.** Every op takes tensors and looks at where they live, so
+the model code is the same for CPU and GPU. Moving a model to the GPU swaps
+the weights' storage (`Qwen3::to_cuda`); nothing else changes.
+
+## Using the library
+
+```rust
+use garlic::models::{self, LogitsMode};
+use garlic::tokenizer::BpeTokenizer;
+use garlic::{Tensor, ops};
+
+let tokenizer = BpeTokenizer::load(dir)?;
+let model = models::from_pretrained(dir)?;          // from_pretrained_on(dir, Device::Cuda) for the GPU
+let mut caches = model.new_kv_caches(1, 64, 32);    // batch, pages in the pool, pages per sequence
+
+let ids = tokenizer.encode("Hello");
+let n = ids.len();
+let positions: Vec<u32> = (0..n as u32).collect();
+let logits = model.forward(
+    &Tensor::from_u32(&ids, &[1, n])?,
+    &Tensor::from_u32(&positions, &[1, n])?,
+    &mut caches,
+    LogitsMode::Last,                               // only the last position's logits
+)?;
+let next = ops::argmax_last(&logits)?[0];
+```
+
+Prefill passes the whole prompt in one call. Decoding then feeds one token at
+a time with its absolute position; the caches remember everything before it.
+`sampling::Sampler` replaces `argmax_last` when you want temperature, top-k,
+top-p or a repetition penalty, and `StreamDecoder` turns tokens into text
+without splitting multi-byte characters. `examples/generate.rs` is the full
+loop and `src/bin/runner.rs` adds streaming, sampling and profiling.
+
 ## One forward pass
 
 ```
