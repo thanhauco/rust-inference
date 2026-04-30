@@ -1,0 +1,287 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>FP8 weights and the bandwidth wall</title>
+<style>html,body{margin:0;background:#0d1117}svg{display:block}</style>
+<svg id="s" width="1280" height="720" viewBox="0 0 1280 720"></svg>
+<script src="lib.js"></script>
+<script>
+const DUR = 52;
+
+// ---- scene A: bytes per second (4 - 14.4 s) ----
+const U = 14; // pixels per byte in the stream
+const SPEED = 90; // px / s, identical for both lanes: same memory bandwidth
+const LX = 330, LW = 650;
+
+function lane(t, y, bytesPerWeight, label, col, alpha) {
+  text(LX, y - 14, label, { size: 17, weight: 600, fill: col, op: alpha });
+  rect(LX, y, LW, 30, { r: 8, fill: '#10151f', stroke: C.line, op: alpha });
+  const s = t * SPEED;
+  const shift = s % U;
+  const base = Math.floor(s / U);
+  const n = Math.floor(LW / U);
+  for (let k = 0; k < n; k++) {
+    const idx = k - base;
+    const wid = Math.floor(idx / bytesPerWeight);
+    const x = LX + 4 + k * U + shift;
+    if (x > LX + LW - U) continue;
+    const first = ((idx % bytesPerWeight) + bytesPerWeight) % bytesPerWeight === 0;
+    const c = wid % 2 === 0 ? col : mix(col, '#ffffff', 0.35);
+    rect(x, y + 6, U - 2, 18, { r: 3, fill: c, op: alpha * 0.9 });
+    if (bytesPerWeight === 2 && first) rect(x - 2, y + 3, U * 2, 24, { r: 6, stroke: C.text, sw: 1, op: alpha * 0.35 });
+  }
+  return s;
+}
+
+function bandwidthScene(t) {
+  const op = win(t, 4, 14.4, 0.5, 0.6);
+  if (op <= 0) return;
+  group(0, 0, 1, op, () => {
+    box(70, 150, 190, 300, '', { r: 14 });
+    text(165, 290, 'RAM', { size: 30, weight: 700, anchor: 'middle' });
+    text(165, 322, 'weights live here', { size: 15, anchor: 'middle', fill: C.dim });
+    box(1040, 150, 170, 300, '', { r: 14 });
+    text(1125, 290, 'CPU / GPU', { size: 24, weight: 700, anchor: 'middle' });
+    text(1125, 320, 'cores', { size: 18, anchor: 'middle', fill: C.dim });
+
+    const two = ramp(t, 9.4, 10.6);
+    const y1 = lerp(280, 215, two);
+    lane(t, y1, 2, 'BF16 · 2 bytes per weight', C.blue, 1);
+    if (two > 0) lane(t, 355, 1, 'FP8 · 1 byte per weight', C.amber, two);
+    arrow(262, y1 + 15, LX - 4, y1 + 15, { stroke: C.dim });
+    arrow(LX + LW + 4, y1 + 15, 1036, y1 + 15, { stroke: C.dim });
+    if (two > 0) {
+      arrow(262, 370, LX - 4, 370, { stroke: C.dim, op: two });
+      arrow(LX + LW + 4, 370, 1036, 370, { stroke: C.dim, op: two });
+    }
+    text(LX + LW / 2, 134, 'memory bandwidth ≈ 26 GB/s  (the 4-vCPU test machine)', {
+      size: 16, anchor: 'middle', fill: C.dim, op: ramp(t, 5.0, 5.8),
+    });
+    // formula
+    const f = ramp(t, 7.0, 8.0);
+    text(W / 2, 520, 'tokens / s  ≈  memory bandwidth  ÷  bytes of weights read per token', {
+      size: 24, anchor: 'middle', mono: true, op: f, fill: C.text,
+    });
+    // weights per second
+    const r = ramp(t, 11.2, 12.2);
+    text(1125, 196, `13 G weights/s`, { size: 17, anchor: 'middle', fill: C.blue, op: r, weight: 600 });
+    text(1125, 424, `26 G weights/s`, { size: 17, anchor: 'middle', fill: C.amber, op: r, weight: 600 });
+    text(W / 2, 575, 'upper bounds at 26 GB/s: 26 ÷ 2 = 13 G weights/s, 26 ÷ 1 = 26 G weights/s', {
+      size: 15, anchor: 'middle', fill: C.dim, op: r,
+    });
+  });
+}
+
+// ---- scene B: the E4M3 byte (14.4 - 24.2 s) ----
+const BITS = [0, 1, 0, 1, 0, 0, 1, 1]; // 0 | 1010 | 011
+const BITCOL = [C.rose, C.amber, C.amber, C.amber, C.amber, C.teal, C.teal, C.teal];
+
+function byteScene(t) {
+  const op = win(t, 14.4, 24.2, 0.5, 0.6);
+  if (op <= 0) return;
+  group(0, 0, 1, op, () => {
+    const X0 = 325, BW = 70, G = 10, Y = 220;
+    const cx = (i) => X0 + i * (BW + G) + BW / 2;
+    BITS.forEach((b, i) => {
+      const k = ramp(t, 14.7 + i * 0.08, 15.3 + i * 0.08, E.back);
+      rect(X0 + i * (BW + G), Y + (1 - k) * 14, BW, 84, {
+        r: 12, fill: mix(C.panel2, BITCOL[i], 0.22), stroke: BITCOL[i], sw: 2, op: clamp(k * 2),
+      });
+      text(cx(i), Y + 58 + (1 - k) * 14, String(b), { size: 40, mono: true, anchor: 'middle', weight: 700, op: clamp(k * 2) });
+    });
+    const grp = (a, b, label, col, o) => {
+      line(cx(a) - BW / 2, 206, cx(b) + BW / 2, 206, { stroke: col, sw: 3, op: o });
+      text((cx(a) + cx(b)) / 2, 190, label, { size: 17, anchor: 'middle', fill: col, weight: 600, op: o });
+    };
+    const lab = ramp(t, 15.4, 16.0);
+    grp(0, 0, 'sign', C.rose, lab);
+    grp(1, 4, 'exponent · 4 bits', C.amber, lab);
+    grp(5, 7, 'mantissa · 3 bits', C.teal, lab);
+
+    const step = (a, x, line1, line2, col) => {
+      const k = ramp(t, a, a + 0.6, E.out);
+      if (k <= 0) return;
+      arrow(x, 322, x, 322 + 30 * k, { stroke: col, op: k });
+      text(x, 392 + (1 - k) * 8, line1, { size: 22, anchor: 'middle', mono: true, fill: col, weight: 700, op: k });
+      text(x, 424 + (1 - k) * 8, line2, { size: 17, anchor: 'middle', fill: C.dim, op: k });
+    };
+    step(16.4, (cx(1) + cx(4)) / 2, '2^(10 − 7) = 8', 'exponent 1010 = 10, bias 7', C.amber);
+    step(17.8, (cx(5) + cx(7)) / 2, '1 + 3/8 = 1.375', 'implicit leading 1, mantissa 011', C.teal);
+    step(19.2, cx(0), '+', 'sign bit 0', C.rose);
+    const r = ramp(t, 20.4, 21.2, E.out);
+    text(W / 2, 520, '+ 8 × 1.375 = 11.0', { size: 44, anchor: 'middle', mono: true, weight: 800, op: r });
+    const m = ramp(t, 21.8, 22.6);
+    text(W / 2, 578, 'largest finite value: 448   (0 1111 110)     no infinities, so large weights need a scale', {
+      size: 17, anchor: 'middle', fill: C.dim, op: m,
+    });
+  });
+}
+
+// ---- scene C: block scales (24.2 - 33.2 s) ----
+const TC = 6, TR = 5, TW = 68, TH = 54, TG = 6;
+const scaleOf = (r, c) => (0.45 + rnd(r * 11 + c * 5 + 3) * 1.6).toFixed(2);
+
+function blockScene(t) {
+  const op = win(t, 24.2, 33.4, 0.5, 0.6);
+  if (op <= 0) return;
+  group(0, 0, 1, op, () => {
+    const gx = (x0, r, c) => [x0 + c * (TW + TG), 140 + r * (TH + TG)];
+    const sel = [2, 3];
+    const hl = ramp(t, 27.2, 28.0);
+    const draw = (x0, title, sub, scales) => {
+      text(x0, 118, title, { size: 15, fill: C.dim, ls: 2 });
+      for (let r = 0; r < TR; r++)
+        for (let c = 0; c < TC; c++) {
+          const [x, y] = gx(x0, r, c);
+          const isSel = r === sel[0] && c === sel[1];
+          const k = ramp(t, 24.6 + (r + c) * 0.08, 25.4 + (r + c) * 0.08);
+          rect(x, y, TW, TH, {
+            r: 8, fill: isSel ? mix(C.panel2, C.amber, 0.25 * hl) : C.panel2,
+            stroke: isSel && hl > 0 ? C.amber : C.line, sw: isSel ? 2.4 : 1.4, op: k,
+          });
+          if (scales) text(x + TW / 2, y + 33, scaleOf(r, c), { size: 17, mono: true, anchor: 'middle', fill: C.amber, op: k });
+          else
+            for (let q = 0; q < 6; q++)
+              rect(x + 8 + (q % 3) * 17, y + 10 + Math.floor(q / 3) * 17, 12, 12, {
+                r: 2, fill: C.blue, op: k * (0.3 + 0.5 * rnd(r * 31 + c * 7 + q)),
+              });
+        }
+      text(x0, 140 + TR * (TH + TG) + 22, sub, { size: 15, fill: C.dim });
+    };
+    draw(80, 'WEIGHT  [N, K]  FP8 BYTES', 'each tile: 128 × 128 bytes', false);
+    draw(600, 'WEIGHT_SCALE_INV  [N/128, K/128]  F32', 'one scale per tile', true);
+    arrow(540, 285, 590, 285, { stroke: C.dim, op: ramp(t, 25.6, 26.2) });
+
+    const e = ramp(t, 28.2, 29.0);
+    text(W / 2, 540, 'w  ≈  decode(byte)  ×  scale[tile]', { size: 30, mono: true, anchor: 'middle', weight: 700, op: e });
+    const n = ramp(t, 30.4, 31.2);
+    text(W / 2, 584, 'edge tiles can be partial: BlockLayout reads the tiling from the scale matrix shape', {
+      size: 17, anchor: 'middle', fill: C.dim, op: n,
+    });
+  });
+}
+
+// ---- scene D: fused decode + dot (33.2 - 42.4 s) ----
+const STEP = 0.45;
+const T0 = 33.9;
+
+function fusedScene(t) {
+  const op = win(t, 33.2, 42.4, 0.5, 0.6);
+  if (op <= 0) return;
+  group(0, 0, 1, op, () => {
+    const s = (t - T0) / STEP;
+    const cur = clamp(Math.floor(s), -1, 16);
+    text(80, 108, 'ONE WEIGHT ROW IN MEMORY (FP8 BYTES), 128-WEIGHT GROUPS', { size: 14, fill: C.dim, ls: 2 });
+    const BX = 80, BWID = 56, BG = 4;
+    for (let i = 0; i < 16; i++) {
+      const g = i < 8 ? 0 : 1;
+      const x = BX + i * (BWID + BG) + g * 18;
+      const active = i === cur;
+      const done = i < cur;
+      rect(x, 150, BWID, 44, {
+        r: 8, fill: active ? mix(C.panel2, C.amber, 0.35) : done ? '#1c2230' : C.panel2,
+        stroke: active ? C.amber : C.line, sw: active ? 2.2 : 1.3, op: done ? 0.55 : 1,
+      });
+      text(x + BWID / 2, 178, '×16', { size: 14, anchor: 'middle', fill: C.dim, op: done ? 0.4 : 0.9 });
+    }
+    [0, 1].forEach((g) => {
+      const x = BX + g * (8 * (BWID + BG) + 18);
+      text(x + (8 * (BWID + BG) - BG) / 2, 138, `group ${g}   ·   scale s${g}`, { size: 16, anchor: 'middle', fill: C.amber, weight: 600 });
+    });
+
+    // registers
+    rect(150, 250, 700, 130, { r: 16, fill: '#121722', stroke: C.line });
+    text(170, 276, 'REGISTERS  (never written back to memory)', { size: 14, fill: C.dim, ls: 2 });
+    const phase = s >= 0 && s < 16 ? (s % 1) * 3 : -1;
+    const parts = [['decode 16 bytes → f32', C.amber], ['× x[k..k+16]  (FMA)', C.blue], ['partial sum', C.teal]];
+    parts.forEach(([label, col], i) => {
+      const on = Math.floor(phase) === i;
+      box(170 + i * 228, 296, 206, 62, label, {
+        r: 12, size: 17, stroke: on ? col : C.line, fill: on ? mix(C.panel2, col, 0.3) : C.panel2,
+      });
+      if (i < 2) arrow(170 + i * 228 + 208, 327, 170 + (i + 1) * 228 - 2, 327, { stroke: C.dim, head: 7 });
+    });
+    if (cur >= 0 && cur < 16)
+      text(BX + cur * (BWID + BG) + (cur < 8 ? 0 : 18) + BWID / 2, 218, '▼ decode next', { size: 13, anchor: 'middle', fill: C.amber });
+
+    // accumulators
+    const inGroup = (g) => clamp(cur - g * 8 + (phase >= 2.0 ? 1 : 0), 0, 8);
+    const done0 = s >= 8;
+    const done1 = s >= 16;
+    text(900, 276, 'group sum', { size: 15, fill: C.dim });
+    rect(900, 288, 260, 22, { r: 8, fill: '#10151f', stroke: C.line });
+    const gsum = s < 8 ? inGroup(0) / 8 : s < 16 ? inGroup(1) / 8 : 1;
+    const flash = (s >= 8 && s < 8.8) || (s >= 16 && s < 16.8);
+    rect(900, 288, 260 * (flash ? 1 - ramp(t, T0 + 8 * STEP, T0 + 8.8 * STEP) : gsum) * 1, 22, { r: 8, fill: C.teal, op: 0.85 });
+    text(900, 340, '× scale, once per group', {
+      size: 17, weight: 700, fill: C.amber, op: flash ? 1 : 0.35,
+    });
+    text(900, 378, 'y[row] +=', { size: 17, mono: true, fill: C.dim });
+    rect(1000, 360, 160, 22, { r: 8, fill: '#10151f', stroke: C.line });
+    rect(1000, 360, 80 * ((done0 ? 1 : 0) + (done1 ? 1 : 0)), 22, { r: 8, fill: C.green, op: 0.85 });
+
+    // integer rebias
+    const c = ramp(t, 37.9, 38.7);
+    if (c > 0) {
+      rect(150, 430, 700, 110, { r: 14, fill: '#0b0f17', stroke: C.line, op: c });
+      text(172, 462, 'bits  = (byte & 0x7f) << 20', { size: 19, mono: true, op: c });
+      text(172, 492, 'bits += 120 << 23', { size: 19, mono: true, op: c, fill: C.amber });
+      text(172, 522, '// rebias the exponent 7 → 127 with an integer add, not a float multiply', { size: 14, mono: true, fill: C.dim, op: c });
+      text(880, 470, 'A float multiply here ran', { size: 15, fill: C.dim, op: c });
+      text(880, 492, 'through the slow subnormal', { size: 15, fill: C.dim, op: c });
+      text(880, 514, 'path: 1.6 → ~15 G weights/s.', { size: 15, fill: C.dim, op: c });
+    }
+  });
+}
+
+// ---- scene E: results (42.4 - 47.6 s) ----
+function resultScene(t) {
+  const op = win(t, 42.4, 47.8, 0.5, 0.6);
+  if (op <= 0) return;
+  group(0, 0, 1, op, () => {
+    text(W / 2, 150, 'CPU decode speed, Qwen3-0.6B shapes', { size: 26, anchor: 'middle', weight: 700 });
+    text(W / 2, 182, '4 vCPU · AVX-512 · greedy · tokens per second', { size: 16, anchor: 'middle', fill: C.dim });
+    [['BF16', 12.1, C.blue, 43.0], ['FP8', 14.9, C.amber, 43.6]].forEach(([name, v, col, a], i) => {
+      const y = 250 + i * 90;
+      const k = ramp(t, a, a + 1.2, E.out);
+      text(250, y + 38, name, { size: 26, weight: 700, anchor: 'end', fill: col });
+      rect(270, y, 700 * (v / 16) * k, 56, { r: 12, fill: col, op: 0.85 });
+      text(270 + 700 * (v / 16) * k + 16, y + 38, (v * k).toFixed(1), { size: 28, weight: 800, op: k });
+    });
+    const n = ramp(t, 45.0, 45.8);
+    text(W / 2, 480, 'On this CPU the decode instructions, not the bytes, are the limit, so the gain is under 2×.', {
+      size: 18, anchor: 'middle', fill: C.dim, op: n,
+    });
+    text(W / 2, 512, 'On a GPU the saving also applies to every expert uploaded over PCIe.', {
+      size: 18, anchor: 'middle', fill: C.dim, op: n,
+    });
+  });
+}
+
+start({
+  duration: DUR,
+  title: 'FP8 weights and the bandwidth wall',
+  draw: (t) => {
+    titleCard(t, 0, 4.2, 'FP8 weights and the bandwidth wall', 'Why decoding is about bytes, not arithmetic', [
+      'E4M3', 'block scales', 'fused decode + dot',
+    ]);
+    bandwidthScene(t);
+    byteScene(t);
+    blockScene(t);
+    fusedScene(t);
+    resultScene(t);
+    titleCard(t, 48.0, 52, 'Fewer bytes per weight', 'Decoded in registers, right where the data already is.', [
+      'src/dtype.rs', 'src/cpu/linear.rs', 'src/quantize.rs',
+    ]);
+    caption(t, [
+      { a: 4.4, b: 9.8, text: 'Generating a token reads every weight from memory once.\nSpeed is set by bytes per second, not by arithmetic.' },
+      { a: 10.4, b: 14.2, text: 'FP8 halves the bytes per weight, so the same bandwidth\ncarries twice as many weights.' },
+      { a: 14.8, b: 21.0, text: 'FP8 E4M3: 1 sign bit, 4 exponent bits, 3 mantissa bits.\nThis byte decodes to +8 × 1.375 = 11.' },
+      { a: 21.5, b: 24.0, text: 'The range is small, so weights need a scale.' },
+      { a: 24.6, b: 28.0, text: "Qwen's FP8 checkpoints keep one F32 scale\nfor every 128 × 128 tile." },
+      { a: 28.4, b: 33.0, text: 'The loader attaches the scale matrix to the weight tensor.\nKernels apply it while they stream the bytes.' },
+      { a: 33.8, b: 37.6, text: 'The matmul reads FP8 bytes and decodes them in registers.\nNothing decoded is written back to memory.' },
+      { a: 38.0, b: 42.2, text: 'Each 128-weight group is summed first and scaled once,\nthen added to the output row.' },
+    ]);
+  },
+});
+</script>
