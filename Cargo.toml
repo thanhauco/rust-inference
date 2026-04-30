@@ -6,6 +6,7 @@ rust-version = "1.89"
 description = "A small LLM inference engine in Rust (port of garlic-inference)"
 license = "MIT"
 readme = "README.md"
+exclude = ["docs/videos/"]
 authors = ["Thanh <thanhauco@gmail.com>"]
 
 [lib]
