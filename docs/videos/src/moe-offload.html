@@ -308,7 +308,8 @@ function prefetchScene(t) {
     const hit = ramp(t, 50.9, 51.6);
     path(`M ${bx(2) + 80} 272 C ${bx(2) + 80} 340, 240 330, 240 402`, { stroke: C.green, sw: 2.4, op: hit });
     arrow(240, 396, 240, 406, { stroke: C.green, op: hit, head: 10 });
-    text(430, 340, 'layer 5 starts: its experts are already resident', { size: 17, anchor: 'middle', fill: C.green, weight: 700, op: hit });
+    text(640, 318, 'layer 5 starts: its experts', { size: 17, fill: C.green, weight: 700, op: hit });
+    text(640, 342, 'are already resident', { size: 17, fill: C.green, weight: 700, op: hit });
   });
 }
 
