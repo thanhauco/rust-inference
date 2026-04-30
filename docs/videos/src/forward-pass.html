@@ -1,0 +1,306 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>One token, start to finish</title>
+<style>html,body{margin:0;background:#0d1117}svg{display:block}</style>
+<svg id="s" width="1280" height="720" viewBox="0 0 1280 720"></svg>
+<script src="lib.js"></script>
+<script>
+const DUR = 50;
+
+// ---- scene 1: text -> tokens -> embeddings (4 - 12.4 s) ----
+const PROMPT = 'Why is the sky blue?';
+const TOKS = ['Why', ' is', ' the', ' sky', ' blue', '?'];
+const chipLabel = (s) => s.replace(' ', '·');
+const chipW = (s) => textWidth(chipLabel(s), 26, true) + 34;
+
+function tokenizeScene(t) {
+  const op = win(t, 4, 12.4, 0.5, 0.6);
+  if (op <= 0) return;
+  group(0, 0, 1, op, () => {
+    // typed prompt
+    const full = textWidth(PROMPT, 34, true);
+    const shown = Math.floor(ramp(t, 4.3, 6.0, E.lin) * PROMPT.length);
+    const fadeP = 1 - 0.6 * ramp(t, 6.3, 7.4);
+    text(W / 2 - full / 2, 200, PROMPT.slice(0, shown), { size: 34, mono: true, op: fadeP });
+    if (shown < PROMPT.length || t < 6.3)
+      rect(W / 2 - full / 2 + shown * 34 * 0.6 + 2, 174, 3, 34, { fill: C.teal, op: Math.floor(t * 3) % 2 ? 0.2 : 1 });
+    text(W / 2, 140, 'tokenizer', { size: 16, anchor: 'middle', fill: C.teal, ls: 3, op: ramp(t, 4.2, 4.8) });
+
+    // chips drop out of the text
+    const gap = 18;
+    const total = TOKS.reduce((s, k) => s + chipW(k), 0) + gap * (TOKS.length - 1);
+    let x = W / 2 - total / 2;
+    TOKS.forEach((k, i) => {
+      const w = chipW(k);
+      const p = ramp(t, 6.3 + i * 0.12, 7.3 + i * 0.12, E.back);
+      if (p > 0) {
+        const y = lerp(200 - 30, 300, p);
+        rect(x, y, w, 50, { r: 12, fill: C.panel2, stroke: C.teal, op: clamp(p * 2) });
+        text(x + w / 2, y + 34, chipLabel(k), { size: 26, mono: true, anchor: 'middle', op: clamp(p * 2) });
+        text(x + w / 2, 372, `pos ${i}`, { size: 15, anchor: 'middle', fill: C.dim, op: ramp(t, 7.4, 8.0) });
+        // embedding column
+        const q = ramp(t, 8.4 + i * 0.25, 9.4 + i * 0.25);
+        if (q > 0) {
+          arrow(x + w / 2, 386, x + w / 2, 386 + 44 * q, { stroke: C.dim, op: q });
+          for (let b = 0; b < 8; b++) {
+            const h = (14 + rnd(i * 13 + b) * 56) * q;
+            const col = mix(C.blue, C.violet, rnd(i * 7 + b * 3));
+            rect(x + w / 2 - 44 + b * 11, 540 - h, 8, h, { r: 2, fill: col, op: 0.9 });
+          }
+        }
+      }
+      x += w + gap;
+    });
+    text(W / 2, 580, 'one D-dimensional vector per token  →  hidden states [1, S, D]', {
+      size: 19, anchor: 'middle', fill: C.dim, op: ramp(t, 10.6, 11.4),
+    });
+  });
+}
+
+// ---- scene 2: one decoder layer (12.4 - 26.6 s) ----
+const STAGES = [
+  ['rms_norm', C.teal, 'RMSNorm', ['Scale the hidden state to unit RMS,', 'then apply a learned weight.']],
+  ['q · k · v projections', C.teal, 'Q, K, V projections', ['Three linear layers. FP8 weights are', 'decoded inside the matmul kernel.']],
+  ['q/k norm + RoPE', C.teal, 'Per-head norm + RoPE', ['Qwen3 norms every head of q and k,', 'then rotates them by token position.']],
+  ['KvCache::append', C.violet, 'Append K and V to the cache', ['New keys and values go into the', "layer's paged KV cache."]],
+  ['paged attention', C.violet, 'Paged attention', ['Each query attends to all cached keys:', 'causal, grouped-query, online softmax.']],
+  ['o projection', C.teal, 'Output projection', ['Mix the attention heads back to', 'the model width.']],
+  ['add + rms_norm', C.green, 'Add + RMSNorm', ['Add to the residual stream and', 'normalise again, as one fused op.']],
+  ['MLP  |  MoE experts', C.amber, 'MLP or experts', ['Dense layers run a SwiGLU MLP.', 'MoE layers route to a few experts.']],
+  ['add residual', C.green, 'Add residual', ['Add back to the residual stream.', 'On to the next layer.']],
+];
+const SX = 340, SW = 310, SH = 40, SY = (i) => 88 + i * 50;
+
+function layerScene(t) {
+  const op = win(t, 12.4, 26.8, 0.5, 0.6);
+  if (op <= 0) return;
+  group(0, 0, 1, op, () => {
+    const cur = clamp(Math.floor((t - 12.9) / 1.25), 0, STAGES.length - 1);
+    const looping = t > 24.1;
+    // residual stream
+    line(290, 70, 290, SY(8) + SH + 12, { stroke: C.green, sw: 2, dash: '6 6', op: 0.6 });
+    text(290, 62, 'residual stream', { size: 14, anchor: 'middle', fill: C.green, op: 0.8 });
+    [0, 7].forEach((i) => arrow(290, SY(i) + SH / 2, SX - 2, SY(i) + SH / 2, { stroke: C.green, op: 0.5, head: 7 }));
+    [6, 8].forEach((i) => {
+      line(SX, SY(i) + SH / 2, 306, SY(i) + SH / 2, { stroke: C.green, op: 0.5 });
+      circle(290, SY(i) + SH / 2, 11, { fill: C.bg, stroke: C.green, sw: 2 });
+      text(290, SY(i) + SH / 2 + 6, '+', { size: 18, anchor: 'middle', fill: C.green, weight: 700 });
+    });
+    // stages
+    STAGES.forEach(([label, col], i) => {
+      const active = !looping && i === cur;
+      const done = looping || i < cur;
+      if (i > 0) arrow(SX + SW / 2, SY(i - 1) + SH, SX + SW / 2, SY(i) - 1, { stroke: C.line, head: 6, sw: 1.5 });
+      if (active) rect(SX - 6, SY(i) - 6, SW + 12, SH + 12, { r: 14, fill: col, op: 0.18, filter: 'glow' });
+      box(SX, SY(i), SW, SH, label, {
+        r: 10, size: 19, fill: active ? mix(C.panel2, col, 0.28) : C.panel2,
+        stroke: active ? col : done ? mix(C.line, col, 0.45) : C.line, sw: active ? 2.4 : 1.5,
+        color: active ? C.text : done ? C.text : C.dim, mono: label === 'KvCache::append',
+      });
+    });
+    // travelling packet
+    const pos = looping
+      ? SY(0) + SH / 2 + ((t * 3.1) % 1) * (SY(8) - SY(0))
+      : lerp(SY(Math.max(cur - 1, 0)) + SH / 2, SY(cur) + SH / 2, ramp((t - 12.9) % 1.25, 0, 0.35));
+    circle(314, pos, 9, { fill: C.teal, op: 0.5, filter: 'glow' });
+    circle(314, pos, 5, { fill: C.teal });
+
+    // right-hand panel
+    const L = 28;
+    const layerNo = looping ? 1 + Math.floor(ramp(t, 24.3, 26.2, E.out) * (L - 1)) : 1;
+    text(720, 116, 'DECODER LAYER', { size: 15, fill: C.dim, ls: 3 });
+    text(720, 176, String(layerNo).padStart(2, '0'), { size: 64, weight: 800, fill: C.teal });
+    text(800, 176, `/ ${L}`, { size: 30, fill: C.dim, weight: 600 });
+    text(720, 204, 'Qwen3-0.6B has 28 layers, Qwen3-30B-A3B has 48.', { size: 16, fill: C.dim });
+    if (!looping) {
+      const [, col, title, lines] = STAGES[cur];
+      const k = ramp(t - 12.9 - cur * 1.25, 0, 0.35, E.out);
+      rect(720, 266, 5, 112, { r: 2, fill: col, op: k });
+      text(742, 296, title, { size: 30, weight: 700, op: k });
+      lines.forEach((l, i) => text(742, 336 + i * 30, l, { size: 21, fill: C.dim, op: k }));
+    } else {
+      const k = ramp(t, 24.2, 24.8);
+      text(720, 296, 'Repeat for every layer', { size: 30, weight: 700, op: k });
+      text(720, 336, 'The residual stream carries the token', { size: 21, fill: C.dim, op: k });
+      text(720, 366, 'from the first layer to the last.', { size: 21, fill: C.dim, op: k });
+    }
+  });
+}
+
+// ---- scene 3: paged KV cache (26.6 - 38.9 s) ----
+const PAGE_ORDER = [3, 0, 2, 1]; // physical page of logical page 0..3
+const APPENDS = [28.0, 29.2, 30.4, 32.6];
+const ALLOC_AT = 32.2;
+const px = (p) => 70 + (p % 4) * 188;
+const py = (p) => 150 + Math.floor(p / 4) * 142;
+
+function kvScene(t) {
+  const op = win(t, 26.6, 38.9, 0.6, 0.6);
+  if (op <= 0) return;
+  group(0, 0, 1, op, () => {
+    const n = 93 + APPENDS.filter((x) => t >= x).length;
+    const lastApp = Math.max(-9, ...APPENDS.filter((x) => t >= x));
+    const alloc = t >= ALLOC_AT;
+    const visit = t - 33.7; // attention sweep
+    const visiting = visit >= 0 ? Math.floor(visit / 0.95) : -1;
+
+    text(70, 124, 'PHYSICAL PAGE POOL (ONE LAYER)', { size: 14, fill: C.dim, ls: 2.5 });
+    for (let p = 0; p < 8; p++) {
+      const lg = PAGE_ORDER.indexOf(p);
+      const owned = lg >= 0 && (lg < 3 || alloc);
+      const x = px(p), y = py(p);
+      const pulse = p === 1 && t > 31.7 && t < ALLOC_AT + 0.5 ? 0.5 + 0.5 * Math.sin(t * 14) : 0;
+      const seen = owned && visiting >= lg;
+      rect(x, y, 170, 106, {
+        r: 10, fill: C.panel, sw: pulse ? 2.5 : 1.6,
+        stroke: pulse ? mix(C.line, C.amber, pulse) : seen ? C.violet : owned ? C.teal : C.line,
+      });
+      if (seen) rect(x, y, 170, 106, { r: 10, fill: C.violet, op: visiting === lg ? 0.2 : 0.07 });
+      text(x + 9, y + 17, `page ${p}`, { size: 13, fill: owned ? C.teal : C.dim, weight: 600 });
+      if (owned) text(x + 161, y + 17, `L${lg}`, { size: 13, anchor: 'end', fill: C.teal, weight: 700 });
+      else text(x + 161, y + 17, 'free', { size: 13, anchor: 'end', fill: C.dim, op: 0.7 });
+      for (let j = 0; j < 32; j++) {
+        const idx = 32 * lg + j;
+        const filled = owned && idx < n;
+        const recent = owned && idx === n - 1 && t - lastApp < 0.8;
+        rect(x + 8 + (j % 8) * 20, y + 26 + Math.floor(j / 8) * 20, 15, 15, {
+          r: 3, fill: recent ? C.amber : filled ? C.teal : '#222a3b', op: filled ? (recent ? 1 : 0.8) : 0.9,
+        });
+      }
+    }
+    text(70, 436, 'each page: [kv_heads, 32 tokens, head_dim] of K and of V', { size: 16, fill: C.dim });
+    if (t > 31.7 && t < ALLOC_AT + 1.2)
+      text(70, 470, 'page L2 is full  →  take page 1 from the free list', {
+        size: 20, fill: C.amber, weight: 600, op: win(t, 31.7, ALLOC_AT + 1.2, 0.3, 0.4),
+      });
+
+    // page table
+    const X = 850;
+    text(X, 124, 'PAGE TABLE · SEQUENCE 0', { size: 14, fill: C.dim, ls: 2.5 });
+    rect(X, 140, 360, 202, { r: 12, fill: C.panel, stroke: C.line });
+    PAGE_ORDER.forEach((p, lg) => {
+      const k = lg < 3 ? 1 : ramp(t, ALLOC_AT, ALLOC_AT + 0.5);
+      if (k <= 0) return;
+      const y = 156 + lg * 44;
+      rect(X + 14, y, 332, 36, { r: 8, fill: C.panel2, op: k });
+      text(X + 30, y + 25, `logical page ${lg}`, { size: 17, fill: C.dim, op: k });
+      text(X + 190, y + 25, '→', { size: 18, fill: C.dim, op: k });
+      text(X + 220, y + 25, `physical ${p}`, { size: 17, weight: 700, fill: C.teal, op: k });
+    });
+    text(X, 380, 'FREE LIST', { size: 14, fill: C.dim, ls: 2.5 });
+    const free = [1, 4, 5, 6, 7];
+    let fx = X;
+    free.forEach((p) => {
+      const gone = p === 1 ? ramp(t, ALLOC_AT - 0.1, ALLOC_AT + 0.4) : 0;
+      box(fx, 394, 52, 36, String(p), { r: 8, size: 17, op: 1 - gone, stroke: p === 1 && t > 31.7 ? C.amber : C.line });
+      fx += 62;
+    });
+    text(X, 480, 'CONTEXT', { size: 14, fill: C.dim, ls: 2.5 });
+    text(X, 530, String(n), { size: 54, weight: 800, fill: t - lastApp < 0.8 ? C.amber : C.text });
+    text(X + 100, 530, 'tokens', { size: 24, fill: C.dim });
+
+    // attention sweep: q visits the pages in page-table order
+    if (t > 33.4) {
+      const k = win(t, 33.4, 38.6, 0.3, 0.5);
+      box(70, 478, 56, 40, 'q', { r: 20, size: 20, stroke: C.violet, fill: mix(C.panel2, C.violet, 0.3), op: k, mono: true });
+      PAGE_ORDER.forEach((p, lg) => {
+        const bx = 160 + lg * 150;
+        const on = visiting === lg;
+        const done = visiting > lg;
+        arrow(bx - 30, 498, bx - 4, 498, { stroke: C.violet, op: k * (visiting >= lg ? 0.9 : 0.25), head: 7 });
+        box(bx, 478, 118, 40, `L${lg} → page ${p}`, {
+          r: 10, size: 16, op: k, stroke: on ? C.violet : done ? mix(C.line, C.violet, 0.6) : C.line,
+          fill: on ? mix(C.panel2, C.violet, 0.3) : C.panel2, color: visiting >= lg ? C.text : C.dim,
+        });
+      });
+      text(70, 552, 'online softmax keeps a running (max, sum, weighted sum) and folds each page in', {
+        size: 16, fill: C.dim, op: k,
+      });
+    }
+  });
+}
+
+// ---- scene 4: prefill vs decode (38.9 - 46.4 s) ----
+const GEN = ['Because', ' air', ' scatters', ' blue', ' light'];
+
+function loopScene(t) {
+  const op = win(t, 38.9, 46.4, 0.6, 0.6);
+  if (op <= 0) return;
+  group(0, 0, 1, op, () => {
+    // prefill lane
+    text(70, 156, 'PREFILL', { size: 16, fill: C.teal, ls: 3, weight: 700 });
+    text(70, 180, 'once', { size: 15, fill: C.dim });
+    const small = TOKS.map((k) => textWidth(chipLabel(k), 18, true) + 22);
+    let x = 200;
+    const p1 = ramp(t, 39.2, 40.3);
+    TOKS.forEach((k, i) => {
+      const cx = x + p1 * 60;
+      const co = clamp(1 - (p1 * 1.4 - 0.4 + (cx + small[i] - 620) / 120 * p1));
+      rect(cx, 142, small[i], 36, { r: 9, fill: C.panel2, stroke: C.teal, op: co });
+      text(cx + small[i] / 2, 166, chipLabel(k), { size: 18, mono: true, anchor: 'middle', op: co });
+      x += small[i] + 8;
+    });
+    const fw = ramp(t, 40.0, 40.4);
+    box(640, 136, 270, 48, 'forward · all 6 tokens', { size: 18, stroke: fw ? C.teal : C.line, fill: mix(C.panel2, C.teal, 0.2 * fw) });
+    arrow(910, 160, 1000, 160, { stroke: C.dim, op: ramp(t, 40.3, 40.8) });
+    box(1004, 136, 210, 48, 'last-position logits', { size: 17, op: ramp(t, 40.4, 40.9), stroke: C.amber });
+    text(1109, 206, 'LogitsMode::Last', { size: 14, mono: true, anchor: 'middle', fill: C.dim, op: ramp(t, 40.6, 41.1) });
+
+    // decode lane
+    const step = (t - 41.0) / 0.95;
+    text(70, 376, 'DECODE', { size: 16, fill: C.amber, ls: 3, weight: 700 });
+    text(70, 400, 'every token', { size: 15, fill: C.dim });
+    const nodes = [['last token', 230, 140], ['forward · 1 token', 440, 190], ['logits', 690, 110], ['sample / argmax', 850, 200]];
+    const act = step >= 0 && step < GEN.length ? Math.floor((step % 1) * 4) : -1;
+    nodes.forEach(([label, nx, nw], i) => {
+      const on = i === act;
+      box(nx, 348, nw, 56, label, { size: 18, stroke: on ? C.amber : C.line, fill: on ? mix(C.panel2, C.amber, 0.25) : C.panel2 });
+      if (i < 3) arrow(nx + nw + 2, 376, nodes[i + 1][1] - 2, 376, { stroke: C.dim, head: 7 });
+    });
+    // return path
+    path('M 950 406 L 950 440 L 300 440 L 300 408', { stroke: C.dim, sw: 1.6, dash: '5 6' });
+    arrow(300, 412, 300, 406, { stroke: C.dim, head: 8 });
+    text(625, 466, 'append the new token, repeat', { size: 15, anchor: 'middle', fill: C.dim });
+
+    // generated text
+    text(70, 540, 'OUTPUT', { size: 14, fill: C.dim, ls: 2.5 });
+    let gx = 200;
+    GEN.forEach((g, i) => {
+      const w = textWidth(chipLabel(g), 22, true) + 28;
+      const k = ramp(t, 41.5 + i * 0.95, 42.0 + i * 0.95, E.back);
+      if (k > 0) {
+        rect(gx, 512, w, 42, { r: 10, fill: C.panel2, stroke: C.amber, op: clamp(k * 2) });
+        text(gx + w / 2, 541, chipLabel(g), { size: 22, mono: true, anchor: 'middle', op: clamp(k * 2) });
+      }
+      gx += w + 10;
+    });
+  });
+}
+
+start({
+  duration: DUR,
+  title: 'One token, start to finish',
+  draw: (t) => {
+    titleCard(t, 0, 4.2, 'One token, start to finish', 'How garlic-inference runs a Qwen3 model', [
+      'tokenizer', 'decoder layers', 'paged KV cache', 'prefill + decode',
+    ]);
+    tokenizeScene(t);
+    layerScene(t);
+    kvScene(t);
+    loopScene(t);
+    titleCard(t, 46.6, 50, 'That is the whole loop', 'Prefill once, then one token at a time, with the KV cache growing page by page.', [
+      'src/models/qwen3.rs', 'src/kvcache.rs', 'src/attention.rs',
+    ]);
+    caption(t, [
+      { a: 4.4, b: 12.2, text: 'The BPE tokenizer turns text into token ids.\nThe embedding table gives every id a vector.' },
+      { a: 13.0, b: 23.9, text: 'Every decoder layer runs this pipeline on the hidden states.' },
+      { a: 24.3, b: 26.6, text: 'A model stacks dozens of these layers.' },
+      { a: 27.0, b: 31.6, text: 'K and V live in 32-token pages from a free list,\nnot in one contiguous buffer per sequence.' },
+      { a: 31.9, b: 33.4, text: 'When a page fills up, the next free page joins the page table.' },
+      { a: 33.8, b: 38.6, text: 'Attention walks the page table and folds in one page\nat a time with an online softmax.' },
+      { a: 39.2, b: 40.9, text: 'Prefill: the whole prompt goes through in one pass.\nOnly the last position needs logits.' },
+      { a: 41.2, b: 46.2, text: 'Decode: one token per step. Forward, sample, append, repeat.\nThe KV cache supplies everything that came before.' },
+    ]);
+  },
+});
+</script>
