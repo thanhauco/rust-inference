@@ -3,6 +3,25 @@
 This is a map of how a token flows through the engine and where each piece
 lives. Names in parentheses are the C++ garlic-inference counterparts.
 
+## Overview
+
+```mermaid
+flowchart LR
+    runner["bin/runner"] --> tok["tokenizer"]
+    runner --> models
+    subgraph garlic["garlic (library)"]
+        st["safetensors + tensor"] --> models["models: Qwen3 dense / MoE"]
+        models --> ops["ops: device-dispatching"]
+        models --> kv["kvcache + attention"]
+        models --> mc["moe_cache: residency policies"]
+        ops --> cpu["cpu: SIMD kernels, expert executor"]
+        kv --> cpu
+        ops --> cuda["cuda: kernels, cuBLAS, offload"]
+        kv --> cuda
+        mc --> cuda
+    end
+```
+
 ## Tensors and devices
 
 `Tensor` (`Tensor` + `DataView`) is a shape, a dtype and a byte offset into
@@ -30,6 +49,20 @@ contiguous buffer per sequence. A per-sequence page table maps token
 positions to pages, and pages come from a free list as the sequence grows.
 `--max-pages` sizes the pool and `--pages-per-seq` caps a sequence, so the
 default of 128 pages allows 4096 tokens of context.
+
+```mermaid
+flowchart LR
+    pt["page table of sequence 0, 70 tokens: 3, 0, 5"]
+    subgraph pool["page pool of one layer, max_pages pages of 32 tokens"]
+        p3["page 3: tokens 0-31"]
+        p0["page 0: tokens 32-63"]
+        p5["page 5: tokens 64-69"]
+        fl["pages 1, 2, 4, 6 ...: free list"]
+    end
+    pt -->|"logical page 0"| p3
+    pt -->|"logical page 1"| p0
+    pt -->|"logical page 2"| p5
+```
 
 **Block-scaled FP8.** An FP8 (E4M3) weight is one byte per value plus a
 scale for each 128x128 tile (`<name>_scale_inv`, an F32 matrix). A value is
@@ -95,6 +128,28 @@ for each decoder layer:
 logits = rmsnorm(hidden[last]) W_lm   (LogitsMode::Last skips the other rows)
 ```
 
+```mermaid
+flowchart TD
+    ids["token ids"] --> emb["embedding"]
+    emb --> n1
+    subgraph layer["repeated for every decoder layer"]
+        n1["rms_norm"] --> qkv["q, k, v projections"]
+        qkv --> qk["per-head rms_norm and rope on q, k"]
+        qk --> app["KvCache append"]
+        app --> att["paged attention"]
+        att --> oproj["o projection"]
+        oproj --> an["add residual, rms_norm"]
+        an --> ffn{"dense layer?"}
+        ffn -->|yes| mlp["SwiGLU MLP"]
+        ffn -->|no| moe["router, top-k, experts"]
+        mlp --> res["add residual"]
+        moe --> res
+    end
+    res --> fn["final rms_norm"]
+    fn --> lm["lm_head on the last position"]
+    lm --> logits["logits"]
+```
+
 `ops::*` are free functions that dispatch on the tensor's device
 (`linear`, `rms_norm`, ...), so `models/qwen3.rs` has a single code path.
 
@@ -115,6 +170,15 @@ logits = rmsnorm(hidden[last]) W_lm   (LogitsMode::Last skips the other rows)
   dependent stages (gate/up rows, then down rows); workers steal chunks
   across every in-flight expert, and submission is non-blocking.
 
+```mermaid
+flowchart LR
+    job["expert job: x, W gate, W up, W down"] --> s1["stage 1: gate/up rows in 64-row chunks, then SwiGLU"]
+    s1 -->|"all chunks done"| s2["stage 2: down rows in 64-row chunks"]
+    s2 --> done["job done, output taken"]
+    pool["worker threads"] -.->|"steal chunks from any in-flight job"| s1
+    pool -.-> s2
+```
+
 The runner uses mimalloc: with glibc's allocator every op's output buffer
 was returned to the kernel and page-faulted again, and parallel first-touch
 faults serialise in the kernel.
@@ -125,6 +189,19 @@ The router is a linear plus top-k softmax (`norm_topk_prob` renormalises
 over the selected experts). `MoeRouting` lays the (token, choice) pairs out
 contiguously per expert (`moe_gather`), each expert runs on its block, and
 `scatter` adds the outputs back per token, weighted.
+
+```mermaid
+flowchart LR
+    h["hidden states, T tokens"] --> router["router linear, top-k softmax"]
+    router --> gather["gather: group the token-choice pairs by expert"]
+    gather --> e0["expert 3: tokens 0, 4"]
+    gather --> e1["expert 7: token 1"]
+    gather --> e2["expert 9: tokens 2, 3, 5"]
+    e0 --> scatter["scatter: weighted add back per token"]
+    e1 --> scatter
+    e2 --> scatter
+    scatter --> out["MoE output, T tokens"]
+```
 
 ### GPU expert offloading (`src/cuda/moe.rs`, `src/moe_cache.rs`)
 
@@ -149,6 +226,51 @@ If the experts fit in VRAM they all stay resident. Otherwise
 * **prefetch**: during decode, layer `l` runs layer `l+2`'s router on its
   own hidden state and starts uploading the experts it picks.
 
+How one layer decides where each of its experts runs:
+
+```mermaid
+flowchart TD
+    a["experts with tokens in this layer"] --> b{"resident on the GPU?"}
+    b -->|yes| g["run on the GPU"]
+    b -->|no| c{"tokens at most cpu_threshold?"}
+    c -->|yes| d["run on the CPU executor, straight from the pinned buffer"]
+    d --> u["upload the output rows"]
+    c -->|no| e["ExpertCache prepare: take a slot, evict by LRU or layer distance"]
+    e --> f["transfer stream uploads the pinned expert and records an event"]
+    f --> w["compute stream waits on the event"]
+    w --> g
+    g --> m["scatter into the layer output"]
+    u --> m
+```
+
+Why the two streams cannot overwrite each other's data:
+
+```mermaid
+sequenceDiagram
+    participant C as compute stream
+    participant T as transfer stream
+    participant H as pinned host memory
+    Note over C,T: expert e must be loaded into slot s
+    C->>T: event after the last kernel that reads slot s (the evicted expert)
+    T->>T: wait for that event before overwriting the slot
+    H->>T: copy the packed expert into slot s
+    T->>C: record the ready event for e
+    C->>C: wait for the ready event, run e on the GPU
+    C->>T: event after e's kernels, slot s may be reused
+```
+
+Speculative prefetch during decode:
+
+```mermaid
+flowchart LR
+    l["hidden state at layer l"] --> r["router of layer l+2"]
+    r --> p["experts it would pick"]
+    p --> up["transfer stream uploads them early"]
+    l --> run["layer l runs as usual"]
+    up -.->|"already resident when layer l+2 starts"| run2["layer l+2"]
+    run --> run2
+```
+
 ## CUDA backend (`src/cuda`)
 
 cudarc's raw driver API, with `libcuda`, `libnvrtc`, `libcublas` (and
@@ -168,6 +290,16 @@ then NFC normalisation, then the Qwen pre-tokenizer regex (matched by hand
 because `regex` has no lookahead), the GPT-2 byte alphabet, and merges by
 rank on a heap over a linked symbol list. `StreamDecoder` buffers partial
 UTF-8 while streaming.
+
+```mermaid
+flowchart LR
+    text["text"] --> sp["split out added tokens"]
+    sp --> nfc["NFC normalisation"]
+    nfc --> pre["Qwen pre-tokenizer regex"]
+    pre --> by["GPT-2 byte alphabet"]
+    by --> bpe["BPE merges by rank, heap over a linked list"]
+    bpe --> ids["token ids"]
+```
 
 ## Verification
 
