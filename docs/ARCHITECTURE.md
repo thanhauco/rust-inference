@@ -5,6 +5,9 @@ lives. Names in parentheses are the C++ garlic-inference counterparts.
 
 ## Overview
 
+Short videos of the three main ideas (the forward pass and KV cache, FP8 weights, MoE
+offloading) are in [videos/](videos/README.md).
+
 ```mermaid
 flowchart LR
     runner["bin/runner"] --> tok["tokenizer"]

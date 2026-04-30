@@ -114,6 +114,11 @@ python scripts/reference_qwen3.py tests/fixtures               # needs `numpy`
 
 ## Documentation
 
+Three short explainer videos ([docs/videos](docs/videos/README.md)):
+[one token start to finish](docs/videos/forward-pass.mp4),
+[FP8 weights and the bandwidth wall](docs/videos/fp8-weights.mp4) and
+[MoE expert offloading](docs/videos/moe-offload.mp4).
+
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) explains the paged KV cache, block-scaled
 FP8, expert offloading, the forward pass, the CPU and CUDA kernels, and how to
 use the crate as a library.
